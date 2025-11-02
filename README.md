@@ -1,13 +1,13 @@
 # USDC Batch Transaction PoC
 
-A proof of concept demonstrating how to batch multiple USDC transactions (approve + transfer) using viem's `sendCalls` function on Base Sepolia testnet.
+A proof of concept demonstrating how to batch multiple USDC transactions (approve + Beefy Zap order execution) using viem's `sendCalls` function on Base Sepolia testnet.
 
 ## Features
 
 - Connect to MetaMask wallet
 - Batch two transactions into one:
-  1. **Approve** 1 USDC spending
-  2. **Transfer** 1 USDC to a recipient address
+  1. **Approve** 1 USDC spending for Beefy Zap Router
+  2. **Execute Beefy Zap order** to deposit USDC into a Beefy vault
 - Automatic network switching to Base Sepolia
 - Fallback support for wallets that don't fully support EIP-5792
 
@@ -37,8 +37,7 @@ This will start a Vite development server at `http://localhost:3000`.
 1. Open the application in your browser
 2. Click "Connect MetaMask" and approve the connection
 3. Ensure you're on Base Sepolia network (the app will prompt to switch)
-4. Enter a recipient address in the input field
-5. Click "Send Batch Transaction" to execute the batched approve + transfer
+4. Click "Send Batch Transaction" to execute the batched approve + Beefy Zap order
 
 ## Important Notes
 
@@ -58,16 +57,22 @@ The USDC contract address used is: `0x036CbD53842c5426634e7929541eC2318f3dCF7e`
 
 ### Transaction Flow
 
-1. **Approve**: Grants permission to spend 1 USDC
-2. **Transfer**: Transfers 1 USDC to the recipient
+1. **Approve**: Grants permission to the Beefy Zap Router (`0x6F19Da51d488926C007B9eBaa5968291a2eC6a63`) to spend 1 USDC
+2. **Execute Order**: Executes a Beefy Zap order that deposits 1 USDC into the configured Beefy vault
 
-Both calls are batched together, meaning they're sent as a single transaction bundle.
+Both calls are batched together, meaning they're sent as a single transaction bundle. The order structure includes:
+- **Inputs**: 1 USDC token
+- **Outputs**: LP token from the Beefy vault
+- **Relay**: Vault deposit target
+- **User/Recipient**: Connected wallet address
 
 ## Technical Details
 
 - Uses `viem` for Ethereum interactions
 - Implements EIP-5792 for call bundling
 - USDC uses 6 decimal places (1 USDC = 1,000,000 units)
+- Beefy Zap Router address: `0x6F19Da51d488926C007B9eBaa5968291a2eC6a63`
+- Uses Beefy's `executeOrder` function for vault deposits
 - TypeScript for type safety
 
 ## Troubleshooting
