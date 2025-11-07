@@ -1,80 +1,823 @@
-import { createWalletClient, custom, parseUnits, parseAbi, type Address } from 'viem';
-import { baseSepolia } from 'viem/chains'
+import { createWalletClient, createPublicClient, custom, http, parseAbi, type Address, encodeFunctionData, parseUnits } from 'viem';
+import { baseSepolia, base } from 'viem/chains'
+import { Contract, BrowserProvider } from "ethers"
 
-// USDC Contract Address on Base Sepolia
-// Note: You may need to verify this address for Base Sepolia
-// Common testnet USDC addresses - verify before using in production
-const USDC_ADDRESS: Address = '0x036CbD53842c5426634e7929541eC2318f3dCF7e'; // Base Sepolia USDC (verify this)
-
-// USDC has 6 decimals
-const USDC_DECIMALS = 6;
-const AMOUNT = parseUnits('1', USDC_DECIMALS); // 1 USDC
+const MAINNET = true;
 
 // USDC ABI for approve and transfer functions
-const usdcAbi = parseAbi([
+const USDC_ABI = parseAbi([
     'function approve(address spender, uint256 amount) external returns (bool)',
     'function transfer(address recipient, uint256 amount) external returns (bool)',
+    'function allowance(address owner, address spender) view returns (uint256)',
 ]);
 
-export const BEEFY_ZAP_ABI = [
-    // executeOrder - The function that actually works!
+// Full ABI for Beefy Zap Router (kept for reference)
+// Note: We use BEEFY_ZAP_EXECUTE_ORDER_ABI below to ensure consistent function signature selection
+const BEEFY_ZAP_ABI = [
     {
-        name: 'executeOrder',
-        inputs: [
+        "inputs": [
             {
-                name: 'order',
-                type: 'tuple',
-                components: [
-                    {
-                        name: 'inputs',
-                        type: 'tuple[]',
-                        components: [
-                            { name: 'token', type: 'address' },
-                            { name: 'amount', type: 'uint256' }
-                        ]
-                    },
-                    {
-                        name: 'outputs',
-                        type: 'tuple[]',
-                        components: [
-                            { name: 'token', type: 'address' },
-                            { name: 'minOutputAmount', type: 'uint256' }
-                        ]
-                    },
-                    {
-                        name: 'relay',
-                        type: 'tuple',
-                        components: [
-                            { name: 'target', type: 'address' },
-                            { name: 'value', type: 'uint256' },
-                            { name: 'data', type: 'bytes' }
-                        ]
-                    },
-                    { name: 'user', type: 'address' },
-                    { name: 'recipient', type: 'address' }
-                ]
+                "internalType": "address",
+                "name": "_permit2",
+                "type": "address"
             }
         ],
-        outputs: [],
-        stateMutability: 'payable',
-        type: 'function'
+        "stateMutability": "nonpayable",
+        "type": "constructor"
     },
-    // Legacy beefIn for fallback
     {
-        name: 'beefIn',
-        inputs: [
-            { name: 'beefyVault', type: 'address' },
-            { name: 'tokenAmountOutMin', type: 'uint256' },
-            { name: 'tokenIn', type: 'address' },
-            { name: 'tokenInAmount', type: 'uint256' }
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "target",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "value",
+                "type": "uint256"
+            },
+            {
+                "internalType": "bytes",
+                "name": "callData",
+                "type": "bytes"
+            }
         ],
-        outputs: [],
-        stateMutability: 'nonpayable',
-        type: 'function'
+        "name": "CallFailed",
+        "type": "error"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "caller",
+                "type": "address"
+            }
+        ],
+        "name": "CallerNotZap",
+        "type": "error"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "recipient",
+                "type": "address"
+            }
+        ],
+        "name": "EtherTransferFailed",
+        "type": "error"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "balance",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "relayValue",
+                "type": "uint256"
+            }
+        ],
+        "name": "InsufficientRelayValue",
+        "type": "error"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "owner",
+                "type": "address"
+            },
+            {
+                "internalType": "address",
+                "name": "caller",
+                "type": "address"
+            }
+        ],
+        "name": "InvalidCaller",
+        "type": "error"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "token",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "minAmountOut",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "balance",
+                "type": "uint256"
+            }
+        ],
+        "name": "Slippage",
+        "type": "error"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "target",
+                "type": "address"
+            }
+        ],
+        "name": "TargetingInvalidContract",
+        "type": "error"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "components": [
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "token",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "amount",
+                                "type": "uint256"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.Input[]",
+                        "name": "inputs",
+                        "type": "tuple[]"
+                    },
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "token",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "minOutputAmount",
+                                "type": "uint256"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.Output[]",
+                        "name": "outputs",
+                        "type": "tuple[]"
+                    },
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "target",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "value",
+                                "type": "uint256"
+                            },
+                            {
+                                "internalType": "bytes",
+                                "name": "data",
+                                "type": "bytes"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.Relay",
+                        "name": "relay",
+                        "type": "tuple"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "user",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "recipient",
+                        "type": "address"
+                    }
+                ],
+                "indexed": true,
+                "internalType": "struct IBeefyZapRouter.Order",
+                "name": "order",
+                "type": "tuple"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "caller",
+                "type": "address"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "recipient",
+                "type": "address"
+            }
+        ],
+        "name": "FulfilledOrder",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "previousOwner",
+                "type": "address"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "newOwner",
+                "type": "address"
+            }
+        ],
+        "name": "OwnershipTransferred",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": false,
+                "internalType": "address",
+                "name": "account",
+                "type": "address"
+            }
+        ],
+        "name": "Paused",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "target",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "value",
+                "type": "uint256"
+            },
+            {
+                "indexed": false,
+                "internalType": "bytes",
+                "name": "data",
+                "type": "bytes"
+            }
+        ],
+        "name": "RelayData",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "token",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            }
+        ],
+        "name": "TokenReturned",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": false,
+                "internalType": "address",
+                "name": "account",
+                "type": "address"
+            }
+        ],
+        "name": "Unpaused",
+        "type": "event"
+    },
+    {
+        "inputs": [
+            {
+                "components": [
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "token",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "amount",
+                                "type": "uint256"
+                            }
+                        ],
+                        "internalType": "struct IPermit2.TokenPermissions[]",
+                        "name": "permitted",
+                        "type": "tuple[]"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "nonce",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "deadline",
+                        "type": "uint256"
+                    }
+                ],
+                "internalType": "struct IPermit2.PermitBatchTransferFrom",
+                "name": "_permit",
+                "type": "tuple"
+            },
+            {
+                "components": [
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "token",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "amount",
+                                "type": "uint256"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.Input[]",
+                        "name": "inputs",
+                        "type": "tuple[]"
+                    },
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "token",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "minOutputAmount",
+                                "type": "uint256"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.Output[]",
+                        "name": "outputs",
+                        "type": "tuple[]"
+                    },
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "target",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "value",
+                                "type": "uint256"
+                            },
+                            {
+                                "internalType": "bytes",
+                                "name": "data",
+                                "type": "bytes"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.Relay",
+                        "name": "relay",
+                        "type": "tuple"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "user",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "recipient",
+                        "type": "address"
+                    }
+                ],
+                "internalType": "struct IBeefyZapRouter.Order",
+                "name": "_order",
+                "type": "tuple"
+            },
+            {
+                "internalType": "bytes",
+                "name": "_signature",
+                "type": "bytes"
+            },
+            {
+                "components": [
+                    {
+                        "internalType": "address",
+                        "name": "target",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "value",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "bytes",
+                        "name": "data",
+                        "type": "bytes"
+                    },
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "token",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "int32",
+                                "name": "index",
+                                "type": "int32"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.StepToken[]",
+                        "name": "tokens",
+                        "type": "tuple[]"
+                    }
+                ],
+                "internalType": "struct IBeefyZapRouter.Step[]",
+                "name": "_route",
+                "type": "tuple[]"
+            }
+        ],
+        "name": "executeOrder",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "components": [
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "token",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "amount",
+                                "type": "uint256"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.Input[]",
+                        "name": "inputs",
+                        "type": "tuple[]"
+                    },
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "token",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "minOutputAmount",
+                                "type": "uint256"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.Output[]",
+                        "name": "outputs",
+                        "type": "tuple[]"
+                    },
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "target",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "value",
+                                "type": "uint256"
+                            },
+                            {
+                                "internalType": "bytes",
+                                "name": "data",
+                                "type": "bytes"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.Relay",
+                        "name": "relay",
+                        "type": "tuple"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "user",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "recipient",
+                        "type": "address"
+                    }
+                ],
+                "internalType": "struct IBeefyZapRouter.Order",
+                "name": "_order",
+                "type": "tuple"
+            },
+            {
+                "components": [
+                    {
+                        "internalType": "address",
+                        "name": "target",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "value",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "bytes",
+                        "name": "data",
+                        "type": "bytes"
+                    },
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "token",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "int32",
+                                "name": "index",
+                                "type": "int32"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.StepToken[]",
+                        "name": "tokens",
+                        "type": "tuple[]"
+                    }
+                ],
+                "internalType": "struct IBeefyZapRouter.Step[]",
+                "name": "_route",
+                "type": "tuple[]"
+            }
+        ],
+        "name": "executeOrder",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "owner",
+        "outputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "pause",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "paused",
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "",
+                "type": "bool"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "permit2",
+        "outputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "renounceOwnership",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "tokenManager",
+        "outputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "newOwner",
+                "type": "address"
+            }
+        ],
+        "name": "transferOwnership",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "unpause",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "stateMutability": "payable",
+        "type": "receive"
+    }
+]
+
+const AERODROME_ROUTER_ABI = parseAbi([
+    'function addLiquidity(address tokenA, address tokenB, bool stable, uint256 amountADesired, uint256 amountBDesired, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline) returns (uint256 amountA, uint256 amountB, uint256 liquidity)',
+    'function removeLiquidity(address tokenA, address tokenB, bool stable, uint256 liquidity, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline) returns (uint256 amountA, uint256 amountB)',
+    'function poolFor(address tokenA, address tokenB, bool stable, address factory) view returns (address)',
+    'function defaultFactory() view returns (address)',
+])
+
+// Filtered ABI with only the payable executeOrder function (no Permit2)
+// This ensures simulateContract and writeContract use the same function signature
+const BEEFY_ZAP_EXECUTE_ORDER_ABI = [
+    {
+        "inputs": [
+            {
+                "components": [
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "token",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "amount",
+                                "type": "uint256"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.Input[]",
+                        "name": "inputs",
+                        "type": "tuple[]"
+                    },
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "token",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "minOutputAmount",
+                                "type": "uint256"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.Output[]",
+                        "name": "outputs",
+                        "type": "tuple[]"
+                    },
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "target",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "value",
+                                "type": "uint256"
+                            },
+                            {
+                                "internalType": "bytes",
+                                "name": "data",
+                                "type": "bytes"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.Relay",
+                        "name": "relay",
+                        "type": "tuple"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "user",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "recipient",
+                        "type": "address"
+                    }
+                ],
+                "internalType": "struct IBeefyZapRouter.Order",
+                "name": "_order",
+                "type": "tuple"
+            },
+            {
+                "components": [
+                    {
+                        "internalType": "address",
+                        "name": "target",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "value",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "bytes",
+                        "name": "data",
+                        "type": "bytes"
+                    },
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "token",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "int32",
+                                "name": "index",
+                                "type": "int32"
+                            }
+                        ],
+                        "internalType": "struct IBeefyZapRouter.StepToken[]",
+                        "name": "tokens",
+                        "type": "tuple[]"
+                    }
+                ],
+                "internalType": "struct IBeefyZapRouter.Step[]",
+                "name": "_route",
+                "type": "tuple[]"
+            }
+        ],
+        "name": "executeOrder",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function"
     }
 ] as const
 
-export const BEEFY_ZAP_ROUTER = '0x6F19Da51d488926C007B9eBaa5968291a2eC6a63' as const
+export const BEEFY_ZAP_ROUTER = MAINNET ? '0x6F19Da51d488926C007B9eBaa5968291a2eC6a63' : '0x6F19Da51d488926C007B9eBaa5968291a2eC6a63';
 
 // Check if MetaMask is installed
 function checkMetaMask(): boolean {
@@ -84,12 +827,6 @@ function checkMetaMask(): boolean {
     }
     return true;
 }
-
-// Create wallet client
-let walletClient = createWalletClient({
-    chain: baseSepolia,
-    transport: custom(window.ethereum!),
-});
 
 // UI Elements
 const connectBtn = document.getElementById('connectBtn') as HTMLButtonElement;
@@ -108,7 +845,7 @@ connectBtn.addEventListener('click', async () => {
         showStatus('Connecting to MetaMask...', 'info');
 
         // Request account access
-        const accounts = await window.ethereum.request({
+        const accounts = await window.ethereum?.request({
             method: 'eth_requestAccounts',
         });
 
@@ -123,32 +860,15 @@ connectBtn.addEventListener('click', async () => {
         connectBtn.disabled = true;
         sendBatchBtn.disabled = false;
 
-        // Switch to Base Sepolia if not already
+        // Switch to Base if not already
         try {
-            await window.ethereum.request({
+            await window.ethereum?.request({
                 method: 'wallet_switchEthereumChain',
-                params: [{ chainId: '0x14a34' }], // Base Sepolia chainId
+                params: [{ chainId: MAINNET ? base.id : baseSepolia.id }], // Base chainId
             });
         } catch (switchError: any) {
-            // If chain doesn't exist, try to add it
-            if (switchError.code === 4902) {
-                await window.ethereum.request({
-                    method: 'wallet_addEthereumChain',
-                    params: [
-                        {
-                            chainId: '0x14a34',
-                            chainName: 'Base Sepolia',
-                            nativeCurrency: {
-                                name: 'ETH',
-                                symbol: 'ETH',
-                                decimals: 18,
-                            },
-                            rpcUrls: ['https://sepolia.base.org'],
-                            blockExplorerUrls: ['https://sepolia-explorer.base.org'],
-                        },
-                    ],
-                });
-            }
+            showStatus(`Chain switch error: ${switchError.message}`, 'error');
+            return;
         }
 
         showStatus(`Connected: ${connectedAddress}`, 'success');
@@ -166,67 +886,199 @@ sendBatchBtn.addEventListener('click', async () => {
 
     if (!checkMetaMask()) return;
 
+    // Create ethers.js provider and signer from window.ethereum
+    const ethersProvider = new BrowserProvider(window.ethereum!);
+    const signer = await ethersProvider.getSigner(connectedAddress);
+
     try {
         sendBatchBtn.disabled = true;
         showStatus('Preparing batch transaction...', 'info');
 
-        const vaultAddress = "0x09139a80454609b69700836a9ee12db4b5dbb15f";
+        // beefy zap router txs:
+        // https://basescan.org/address/0x6f19da51d488926c007b9ebaa5968291a2ec6a63
+        //
+        // deposit:
+        // https://basescan.org/tx/0x425a893112c0ede5c2603efec74da35890d52387ae3681d69d9a856cc1d0b0a6
+        // https://basescan.org/inputdatadecoder?tx=0x425a893112c0ede5c2603efec74da35890d52387ae3681d69d9a856cc1d0b0a6
+        //
+        // withdraw:
+        // https://basescan.org/tx/0x4e56db0202904c496979a4500a988affa7de80e2e3c2ce42068d379a0d7826b8
+        // https://basescan.org/inputdatadecoder?tx=0x4e56db0202904c496979a4500a988affa7de80e2e3c2ce42068d379a0d7826b8
+
+        // Contract Address on Base
+        // Note: You may need to verify these addresses for Base
+        const USDC_ADDRESS: Address = MAINNET ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e'; // Base USDC
+        const VAULT_ADDRESS: Address = "0x09139a80454609b69700836a9ee12db4b5dbb15f";
+        const WETH_USDC_ADDRESS: Address = "0xcdac0d6c6c59727a65f871236188350531885c43";
+        const WETH_ADDRESS: Address = "0x4200000000000000000000000000000000000006";
+        const ZERO_ADDRESS: Address = '0x0000000000000000000000000000000000000000';
+        const AERODROME_ROUTER: Address = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43";
+
+        // USDC has 6 decimals
+        const USDC_DECIMALS = 6;
+        const AMOUNT = parseUnits('1', USDC_DECIMALS);
+        // const AMOUNT = 314981n;
 
         // Build order structure (same as Beefy Zap integration)
         const order = {
             inputs: [
+                // array 1
                 {
                     token: USDC_ADDRESS,
                     amount: AMOUNT
                 }
             ],
             outputs: [
+                // array 1
+                {
+                    token: VAULT_ADDRESS,
+                    minOutputAmount: 5967435617n
+                },
+                // array 2
+                {
+                    token: WETH_USDC_ADDRESS,
+                    minOutputAmount: 0n
+                },
+                // array 3
                 {
                     token: USDC_ADDRESS, // LP token address
-                    minOutputAmount: 0 // Accept any output (same as regular Beefy Zap)
+                    minOutputAmount: 0n // Accept any output (same as regular Beefy Zap)
+                },
+                // array 4
+                {
+                    token: WETH_ADDRESS,
+                    minOutputAmount: 0n
                 }
             ],
             relay: {
-                target: vaultAddress,
-                value: 0,
-                data: '0x'
+                target: ZERO_ADDRESS,
+                value: 0n,
+                data: '0x' as `0x${string}`
             },
             user: connectedAddress,
             recipient: connectedAddress
         }
 
-        // Prepare the batch calls
-        const calls = [
+        // Create deadline (2 hour from now)
+        const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600 * 2);
+
+        const route = [
             {
-                to: USDC_ADDRESS,
-                abi: usdcAbi,
-                functionName: 'approve' as const,
-                args: [BEEFY_ZAP_ROUTER, AMOUNT],
-            },
-            {
-                to: BEEFY_ZAP_ROUTER as `0x${string}`,
-                abi: BEEFY_ZAP_ABI,
-                functionName: 'executeOrder',
-                args: [order as any] // Complex type, cast to any for now
+                target: AERODROME_ROUTER,
+                value: 0n,
+                data: encodeFunctionData({
+                    abi: AERODROME_ROUTER_ABI,
+                    functionName: 'addLiquidity',
+                    args: [WETH_ADDRESS, USDC_ADDRESS, false, 150448640747705n, 496315n, 148944154340227n, 491351n, BEEFY_ZAP_ROUTER, deadline]
+                }),
+                // data: "0x" as `0x${string}`,
+                tokens: [
+                    {
+                        token: WETH_ADDRESS,
+                        index: 100
+                    },
+                    {
+                        token: USDC_ADDRESS,
+                        index: 132
+                    }
+                ]
             }
-        ];
+        ]
 
-        showStatus('Requesting wallet approval...', 'info');
+        showStatus('Checking token approvals...', 'info');
 
-        // Send the batch transaction
-        const result = await walletClient.sendCalls({
-            account: connectedAddress,
-            calls,
-            // Enable fallback for wallets that don't support EIP-5792
-            experimental_fallback: true,
+        const usdcContract = new Contract(USDC_ADDRESS, USDC_ABI, signer);
+        const allowance = await usdcContract.allowance(connectedAddress, BEEFY_ZAP_ROUTER);
+        console.log(`Token ${USDC_ADDRESS} allowance to Beefy Zap Router:`, allowance.toString());
+
+        if (allowance < AMOUNT) {
+            showStatus(
+                `Requesting approval for ${AMOUNT.toString()} tokens...\n` +
+                `Current allowance: ${allowance.toString()}`,
+                'info'
+            );
+
+            try {
+                // Request approval for the exact amount needed
+                const approveTx = await usdcContract.approve(BEEFY_ZAP_ROUTER, AMOUNT);
+
+                showStatus(
+                    `Approval transaction submitted: ${approveTx.hash}\n` +
+                    `Waiting for confirmation...`,
+                    'info'
+                );
+
+                // Wait for the approval transaction to be confirmed
+                const approveReceipt = await approveTx.wait();
+                console.log('Approval receipt:', approveReceipt);
+
+                showStatus(
+                    `✅ Approval confirmed! Proceeding with order execution...`,
+                    'success'
+                );
+            } catch (approveError: any) {
+                console.error('Approval error:', approveError);
+                showStatus(
+                    `❌ Approval failed: ${approveError.message || 'Unknown error'}\n` +
+                    `Please approve tokens manually and try again.`,
+                    'error'
+                );
+                sendBatchBtn.disabled = false;
+                return;
+            }
+        } else {
+            console.log(`Token ${USDC_ADDRESS} has sufficient allowance`);
+        }
+
+        // Debug: Encode the function data to see what selector we're generating
+        // Use the filtered ABI to ensure we're using the correct function signature
+        const encodedData = encodeFunctionData({
+            abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+            functionName: 'executeOrder',
+            args: [order, route]
+        });
+        console.log('Encoded function selector:', encodedData.slice(0, 10));
+        console.log('Using executeOrder (payable, no Permit2)');
+
+        showStatus('Preparing transaction with ethers.js...', 'info');
+
+        // Create contract instance with ethers.js signer
+        const beefyZapContract = new Contract(BEEFY_ZAP_ROUTER, BEEFY_ZAP_EXECUTE_ORDER_ABI, signer);
+
+        // Estimate gas using ethers.js
+        try {
+            const gasEstimate = await beefyZapContract.executeOrder.estimateGas(order, route);
+            console.log('Gas estimate:', gasEstimate.toString());
+            showStatus(`Gas estimated: ${gasEstimate.toString()}`, 'info');
+        } catch (gasError: any) {
+            console.warn('Gas estimation failed:', gasError);
+            showStatus(
+                `⚠️ Gas estimation failed: ${gasError.message}\n` +
+                `Proceeding with default gas limit...`,
+                'info'
+            );
+        }
+
+        showStatus('Submitting transaction...', 'info');
+
+        // Execute the order with ethers.js
+        const executeOrderTx = await beefyZapContract.executeOrder(order, route, {
+            gasLimit: 1000000n, // Increased default gas limit
         });
 
         showStatus(
-            `✅ Batch transaction submitted! ID: ${result.id}\n\n` +
-            `The transaction batches:\n` +
-            `1. Approve 1 USDC spending for Beefy Zap Router\n` +
-            `2. Execute Beefy Zap order\n\n` +
-            `Check the transaction status using the ID above.`,
+            `Transaction submitted: ${executeOrderTx.hash}\n` +
+            `Waiting for confirmation...`,
+            'info'
+        );
+
+        const executeOrderReceipt = await executeOrderTx.wait();
+        console.log('Execute order receipt:', executeOrderReceipt);
+
+        showStatus(
+            `✅ Transaction confirmed! Hash: ${executeOrderReceipt.hash}\n\n` +
+            `Block: ${executeOrderReceipt.blockNumber}\n` +
+            `Gas used: ${executeOrderReceipt.gasUsed.toString()}`,
             'success'
         );
 
