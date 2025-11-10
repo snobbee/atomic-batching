@@ -1,4 +1,4 @@
-import { createWalletClient, createPublicClient, custom, parseAbi, type Address, encodeFunctionData, parseUnits } from 'viem';
+import { createWalletClient, createPublicClient, custom, parseAbi, type Address, encodeFunctionData, parseUnits, getContract } from 'viem';
 import { baseSepolia, base } from 'viem/chains'
 
 const MAINNET = true;
@@ -1142,16 +1142,33 @@ sendBatchBtn.addEventListener('click', async () => {
 
         showStatus('Submitting transaction...', 'info');
 
-        // Execute the order with viem
-        const executeOrderHash = await walletClient.writeContract({
-            address: BEEFY_ZAP_ROUTER,
-            abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
-            functionName: 'executeOrder',
-            args: [order, route],
+
+        const beefyZapRouterContract = getContract({ address: BEEFY_ZAP_ROUTER, abi: BEEFY_ZAP_EXECUTE_ORDER_ABI, client: walletClient });
+
+        const nativeInput = order.inputs.find(input => input.token === ZERO_ADDRESS);
+
+        const options = {
             // gas: gasEstimate ?? 1000000n, // Use estimated gas or default
             maxFeePerGas: 12665890n,
-            maxPriorityFeePerGas: 10000000n
-        });
+            maxPriorityFeePerGas: 10000000n,
+            account: order.user,
+            chain: publicClient.chain,
+            value: nativeInput ? nativeInput.amount : undefined
+        }
+
+        console.debug('executeOrder', { order: order, steps: route, options });
+        const executeOrderHash = await beefyZapRouterContract.write.executeOrder([order, route], options);
+
+        // // Execute the order with viem
+        // const executeOrderHash = await walletClient.writeContract({
+        //     address: BEEFY_ZAP_ROUTER,
+        //     abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+        //     functionName: 'executeOrder',
+        //     args: [order, route],
+        //     // gas: gasEstimate ?? 1000000n, // Use estimated gas or default
+        //     maxFeePerGas: 12665890n,
+        //     maxPriorityFeePerGas: 10000000n
+        // });
 
         showStatus(
             `Transaction submitted: ${executeOrderHash}\n` +
