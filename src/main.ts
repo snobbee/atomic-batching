@@ -1,6 +1,5 @@
-import { createWalletClient, createPublicClient, custom, http, parseAbi, type Address, encodeFunctionData, parseUnits } from 'viem';
+import { createWalletClient, createPublicClient, custom, parseAbi, type Address, encodeFunctionData, parseUnits } from 'viem';
 import { baseSepolia, base } from 'viem/chains'
-import { Contract, BrowserProvider } from "ethers"
 
 const MAINNET = true;
 
@@ -886,9 +885,17 @@ sendBatchBtn.addEventListener('click', async () => {
 
     if (!checkMetaMask()) return;
 
-    // Create ethers.js provider and signer from window.ethereum
-    const ethersProvider = new BrowserProvider(window.ethereum!);
-    const signer = await ethersProvider.getSigner(connectedAddress);
+    // Create viem clients from window.ethereum
+    const publicClient = createPublicClient({
+        chain: MAINNET ? base : baseSepolia,
+        transport: custom(window.ethereum!)
+    });
+
+    const walletClient = createWalletClient({
+        chain: MAINNET ? base : baseSepolia,
+        transport: custom(window.ethereum!),
+        account: connectedAddress
+    });
 
     try {
         sendBatchBtn.disabled = true;
@@ -987,8 +994,12 @@ sendBatchBtn.addEventListener('click', async () => {
 
         showStatus('Checking token approvals...', 'info');
 
-        const usdcContract = new Contract(USDC_ADDRESS, USDC_ABI, signer);
-        const allowance = await usdcContract.allowance(connectedAddress, BEEFY_ZAP_ROUTER);
+        const allowance = await publicClient.readContract({
+            address: USDC_ADDRESS,
+            abi: USDC_ABI,
+            functionName: 'allowance',
+            args: [connectedAddress, BEEFY_ZAP_ROUTER]
+        });
         console.log(`Token ${USDC_ADDRESS} allowance to Beefy Zap Router:`, allowance.toString());
 
         if (allowance < AMOUNT) {
@@ -1000,16 +1011,23 @@ sendBatchBtn.addEventListener('click', async () => {
 
             try {
                 // Request approval for the exact amount needed
-                const approveTx = await usdcContract.approve(BEEFY_ZAP_ROUTER, AMOUNT);
+                const approveHash = await walletClient.writeContract({
+                    address: USDC_ADDRESS,
+                    abi: USDC_ABI,
+                    functionName: 'approve',
+                    args: [BEEFY_ZAP_ROUTER, AMOUNT]
+                });
 
                 showStatus(
-                    `Approval transaction submitted: ${approveTx.hash}\n` +
+                    `Approval transaction submitted: ${approveHash}\n` +
                     `Waiting for confirmation...`,
                     'info'
                 );
 
                 // Wait for the approval transaction to be confirmed
-                const approveReceipt = await approveTx.wait();
+                const approveReceipt = await publicClient.waitForTransactionReceipt({
+                    hash: approveHash
+                });
                 console.log('Approval receipt:', approveReceipt);
 
                 showStatus(
@@ -1040,14 +1058,18 @@ sendBatchBtn.addEventListener('click', async () => {
         console.log('Encoded function selector:', encodedData.slice(0, 10));
         console.log('Using executeOrder (payable, no Permit2)');
 
-        showStatus('Preparing transaction with ethers.js...', 'info');
+        showStatus('Preparing transaction with viem...', 'info');
 
-        // Create contract instance with ethers.js signer
-        const beefyZapContract = new Contract(BEEFY_ZAP_ROUTER, BEEFY_ZAP_EXECUTE_ORDER_ABI, signer);
-
-        // Estimate gas using ethers.js
+        // Estimate gas using viem
+        let gasEstimate: bigint | undefined;
         try {
-            const gasEstimate = await beefyZapContract.executeOrder.estimateGas(order, route);
+            gasEstimate = await publicClient.estimateContractGas({
+                address: BEEFY_ZAP_ROUTER,
+                abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+                functionName: 'executeOrder',
+                args: [order, route],
+                account: connectedAddress
+            });
             console.log('Gas estimate:', gasEstimate.toString());
             showStatus(`Gas estimated: ${gasEstimate.toString()}`, 'info');
         } catch (gasError: any) {
@@ -1061,22 +1083,28 @@ sendBatchBtn.addEventListener('click', async () => {
 
         showStatus('Submitting transaction...', 'info');
 
-        // Execute the order with ethers.js
-        const executeOrderTx = await beefyZapContract.executeOrder(order, route, {
-            gasLimit: 1000000n, // Increased default gas limit
+        // Execute the order with viem
+        const executeOrderHash = await walletClient.writeContract({
+            address: BEEFY_ZAP_ROUTER,
+            abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+            functionName: 'executeOrder',
+            args: [order, route],
+            gas: gasEstimate ?? 1000000n, // Use estimated gas or default
         });
 
         showStatus(
-            `Transaction submitted: ${executeOrderTx.hash}\n` +
+            `Transaction submitted: ${executeOrderHash}\n` +
             `Waiting for confirmation...`,
             'info'
         );
 
-        const executeOrderReceipt = await executeOrderTx.wait();
+        const executeOrderReceipt = await publicClient.waitForTransactionReceipt({
+            hash: executeOrderHash
+        });
         console.log('Execute order receipt:', executeOrderReceipt);
 
         showStatus(
-            `✅ Transaction confirmed! Hash: ${executeOrderReceipt.hash}\n\n` +
+            `✅ Transaction confirmed! Hash: ${executeOrderReceipt.transactionHash}\n\n` +
             `Block: ${executeOrderReceipt.blockNumber}\n` +
             `Gas used: ${executeOrderReceipt.gasUsed.toString()}`,
             'success'
