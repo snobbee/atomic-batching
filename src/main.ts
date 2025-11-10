@@ -994,13 +994,48 @@ sendBatchBtn.addEventListener('click', async () => {
 
         showStatus('Checking token approvals...', 'info');
 
-        const allowance = await publicClient.readContract({
-            address: USDC_ADDRESS,
-            abi: USDC_ABI,
-            functionName: 'allowance',
-            args: [connectedAddress, BEEFY_ZAP_ROUTER]
-        });
-        console.log(`Token ${USDC_ADDRESS} allowance to Beefy Zap Router:`, allowance.toString());
+        // Verify we're on the correct chain
+        const chainId = await publicClient.getChainId();
+        const expectedChainId = MAINNET ? base.id : baseSepolia.id;
+        if (chainId !== expectedChainId) {
+            showStatus(
+                `❌ Wrong network! Expected chain ID ${expectedChainId}, but connected to ${chainId}`,
+                'error'
+            );
+            sendBatchBtn.disabled = false;
+            return;
+        }
+
+        // Check if contract exists at address
+        const code = await publicClient.getBytecode({ address: USDC_ADDRESS });
+        if (!code || code === '0x') {
+            showStatus(
+                `❌ No contract found at USDC address: ${USDC_ADDRESS}\n` +
+                `Please verify you're on the correct network (${MAINNET ? 'Base Mainnet' : 'Base Sepolia'})`,
+                'error'
+            );
+            sendBatchBtn.disabled = false;
+            return;
+        }
+
+        let allowance: bigint;
+        try {
+            allowance = await publicClient.readContract({
+                address: USDC_ADDRESS,
+                abi: USDC_ABI,
+                functionName: 'allowance',
+                args: [connectedAddress, BEEFY_ZAP_ROUTER]
+            });
+            console.log(`Token ${USDC_ADDRESS} allowance to Beefy Zap Router:`, allowance.toString());
+        } catch (error: any) {
+            console.error('Error reading allowance:', error);
+            showStatus(
+                `⚠️ Could not read allowance. Assuming 0 and requesting approval...\n` +
+                `Error: ${error.message || 'Unknown error'}`,
+                'info'
+            );
+            allowance = 0n;
+        }
 
         if (allowance < AMOUNT) {
             showStatus(
