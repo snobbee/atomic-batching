@@ -8,11 +8,12 @@ const USDC_ABI = parseAbi([
     'function approve(address spender, uint256 amount) external returns (bool)',
     'function transfer(address recipient, uint256 amount) external returns (bool)',
     'function allowance(address owner, address spender) view returns (uint256)',
+    'function balanceOf(address account) view returns (uint256)',
 ]);
 
 // Full ABI for Beefy Zap Router (kept for reference)
 // Note: We use BEEFY_ZAP_EXECUTE_ORDER_ABI below to ensure consistent function signature selection
-const BEEFY_ZAP_ABI = [
+export const BEEFY_ZAP_ABI = [
     {
         "inputs": [
             {
@@ -691,6 +692,19 @@ const AERODROME_ROUTER_ABI = parseAbi([
     'function defaultFactory() view returns (address)',
 ])
 
+const BEEFY_ROUTER_MINI_ABI = parseAbi([
+    'function tokenManager() view returns (address)',
+]);
+
+const KYBER_API_BASE = 'https://aggregator-api.kyberswap.com/base/api/v1';
+const KYBER_CLIENT_ID = 'atomic-batching-poc';
+
+type KyberBuild = {
+    routerAddress: Address;
+    data: `0x${string}`;
+    value: bigint;
+};
+
 // Filtered ABI with only the payable executeOrder function (no Permit2)
 // This ensures simulateContract and writeContract use the same function signature
 const BEEFY_ZAP_EXECUTE_ORDER_ABI = [
@@ -818,6 +832,114 @@ const BEEFY_ZAP_EXECUTE_ORDER_ABI = [
 
 export const BEEFY_ZAP_ROUTER = MAINNET ? '0x6F19Da51d488926C007B9eBaa5968291a2eC6a63' : '0x6F19Da51d488926C007B9eBaa5968291a2eC6a63';
 
+async function kyberEncodeSwap(params: {
+    tokenIn: Address;
+    tokenOut: Address;
+    amountIn: bigint;
+    zapRouter: Address;
+    slippageBps?: number;
+    deadlineSec?: number;
+    clientId?: string;
+}): Promise<KyberBuild> {
+    const { tokenIn, tokenOut, amountIn, zapRouter } = params;
+    const slippageBps = params.slippageBps ?? 50;
+    const deadline = params.deadlineSec ?? Math.floor(Date.now() / 1000) + 20 * 60;
+    const routeHeaders = params.clientId ? { 'x-client-id': params.clientId } : undefined;
+
+    const query = new URLSearchParams({
+        tokenIn,
+        tokenOut,
+        amountIn: amountIn.toString(),
+    });
+    const routeRes = await fetch(`${KYBER_API_BASE}/routes?${query.toString()}`, {
+        headers: routeHeaders,
+    });
+    const routeRaw = await routeRes.text();
+    let routeJson: any;
+    try {
+        routeJson = JSON.parse(routeRaw);
+    } catch {
+        routeJson = undefined;
+    }
+    if (!routeRes.ok) {
+        throw new Error(`Kyber route: ${routeJson?.message || routeRaw || routeRes.statusText}`);
+    }
+    if (!routeJson) {
+        throw new Error('Kyber route: invalid JSON response');
+    }
+
+    const routeSummary = routeJson?.data?.routeSummary;
+    const routerAddress = routeJson?.data?.routerAddress as Address | undefined;
+    if (!routeSummary || !routerAddress) {
+        throw new Error('Kyber route missing routeSummary/routerAddress');
+    }
+
+    const buildHeaders = {
+        'content-type': 'application/json',
+        ...(params.clientId ? { 'x-client-id': params.clientId } : {}),
+    };
+    const buildRes = await fetch(`${KYBER_API_BASE}/route/build`, {
+        method: 'POST',
+        headers: buildHeaders,
+        body: JSON.stringify({
+            routeSummary,
+            sender: zapRouter,
+            recipient: zapRouter,
+            slippageTolerance: slippageBps,
+            deadline,
+            enableGasEstimation: false,
+            source: params.clientId || 'atomic-batching',
+        }),
+    });
+    const buildRaw = await buildRes.text();
+    let buildJson: any;
+    try {
+        buildJson = JSON.parse(buildRaw);
+    } catch {
+        buildJson = undefined;
+    }
+    if (!buildRes.ok) {
+        throw new Error(`Kyber build: ${buildJson?.message || buildRaw || buildRes.statusText}`);
+    }
+    if (!buildJson) {
+        throw new Error('Kyber build returned invalid JSON');
+    }
+
+    const data = buildJson?.data?.data as `0x${string}` | undefined;
+    const txValue = buildJson?.data?.transactionValue ?? '0';
+    if (!data) {
+        throw new Error('Kyber build returned no calldata');
+    }
+
+    return {
+        routerAddress,
+        data,
+        value: BigInt(txValue),
+    };
+}
+
+function locateAerodromeOffsets(tokenA: Address, tokenB: Address, stable: boolean, to: Address, deadline: bigint) {
+    const SENT_A = 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1n;
+    const SENT_B = 0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2n;
+    const data = encodeFunctionData({
+        abi: AERODROME_ROUTER_ABI,
+        functionName: 'addLiquidity',
+        args: [tokenA, tokenB, stable, SENT_A, SENT_B, 0n, 0n, to, deadline],
+    });
+    const hex = data.slice(2);
+    const findOffset = (sentinel: bigint) => {
+        const needle = sentinel.toString(16).padStart(64, '0');
+        const idx = hex.indexOf(needle);
+        if (idx === -1) throw new Error('Sentinel not found in Aerodrome calldata');
+        return idx / 2;
+    };
+    return {
+        amountAOffset: findOffset(SENT_A),
+        amountBOffset: findOffset(SENT_B),
+        data,
+    };
+}
+
 // Check if MetaMask is installed
 function checkMetaMask(): boolean {
     if (typeof window.ethereum === 'undefined') {
@@ -920,11 +1042,10 @@ sendBatchBtn.addEventListener('click', async () => {
         const WETH_ADDRESS: Address = "0x4200000000000000000000000000000000000006";
         const ZERO_ADDRESS: Address = '0x0000000000000000000000000000000000000000';
         const AERODROME_ROUTER: Address = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43";
-        const ONEINCH_ROUTER: Address = "0x111111125421ca6dc452d289314280a0f8842a65";
 
         // USDC has 6 decimals
         const USDC_DECIMALS = 6;
-        const AMOUNT = parseUnits('1', USDC_DECIMALS);
+        const AMOUNT = parseUnits('0.672107', USDC_DECIMALS);
         // const AMOUNT = 314981n;
 
         // Build order structure (same as Beefy Zap integration)
@@ -933,14 +1054,14 @@ sendBatchBtn.addEventListener('click', async () => {
                 // array 1
                 {
                     token: USDC_ADDRESS,
-                    amount: 672107n
+                    amount: AMOUNT
                 }
             ],
             outputs: [
                 // array 1
                 {
                     token: VAULT_ADDRESS,
-                    minOutputAmount: 3859985056n
+                    minOutputAmount: 0n // disable slippage guard while iterating on static route
                 },
                 // array 2
                 {
@@ -970,36 +1091,50 @@ sendBatchBtn.addEventListener('click', async () => {
         // Create deadline (2 hour from now)
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600 * 2);
 
+        const usdcIn = order.inputs[0].amount;
+        const half = usdcIn / 2n;
+        const swapAmount = half === 0n ? usdcIn : half;
+
+        // Kyber keeps swap funds inside the zap by routing from/to the Beefy router
+        const kyberStep = await kyberEncodeSwap({
+            tokenIn: USDC_ADDRESS,
+            tokenOut: WETH_ADDRESS,
+            amountIn: swapAmount,
+            zapRouter: BEEFY_ZAP_ROUTER,
+            slippageBps: 50,
+            deadlineSec: Number(deadline),
+            clientId: KYBER_CLIENT_ID,
+        });
+        const {
+            amountAOffset: AERODROME_AMOUNT_A_OFFSET,
+            amountBOffset: AERODROME_AMOUNT_B_OFFSET,
+            data: aerodromeAddLiquidityCalldata,
+        } = locateAerodromeOffsets(WETH_ADDRESS, USDC_ADDRESS, false, BEEFY_ZAP_ROUTER, deadline);
+
         const route = [
             {
-                target: ONEINCH_ROUTER,
-                value: 0n,
-                data: "0x07ed23790000000000000000000000008c864d0c8e476bf9eb9d620c10e1296fb0e2f940000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000042000000000000000000000000000000000000060000000000000000000000008c864d0c8e476bf9eb9d620c10e1296fb0e2f9400000000000000000000000006f19da51d488926c007b9ebaa5968291a2ec6a6300000000000000000000000000000000000000000000000000000000000520b5000000000000000000000000000000000000000000000000000055967ebbc63c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000120000000000000000000000000000000000000000000000000000000000000054a00000000000000000000000000000000052c0004fe0004e40004de00004e00a0744c8c09833589fcd6edb6e08f4c7c32d4f71b54bda0291388d19a03c429029901d917510f8f582d2e5f803b00000000000000000000000000000000000000000000000000000000000000a849206ff5693b99212da76ad316178a184ab56d299b43833589fcd6edb6e08f4c7c32d4f71b54bda0291302e424856bc30000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000011000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000380000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000003060b0e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000260000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000001f10000000000000000000000000000000000000000000000000000000000000190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000055967ebbc63c000000000000000000000000000000000000000000000000000000000000012000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000060000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008c864d0c8e476bf9eb9d620c10e1296fb0e2f940000000000000000000000000000000000000000000000000000000000000000000206b4be0b940414200000000000000000000000000000000000006d0e30db080a06c4eca274200000000000000000000000000000000000006111111125421ca6dc452d289314280a0f8842a6500000000000000000000000000000000000000000000a861f365" as `0x${string}`,
+                target: kyberStep.routerAddress,
+                value: kyberStep.value,
+                data: kyberStep.data,
                 tokens: [
                     {
                         token: USDC_ADDRESS,
                         index: -1
-                    }
+                    },
                 ]
             },
             {
                 target: AERODROME_ROUTER,
                 value: 0n,
-                // data: encodeFunctionData({
-                //     abi: AERODROME_ROUTER_ABI,
-                //     functionName: 'addLiquidity',
-                //     args: [WETH_ADDRESS, USDC_ADDRESS, false, 150448640747705n, 496315n, 148944154340227n, 491351n, BEEFY_ZAP_ROUTER, deadline]
-                // }),
-                data: "0x5a47ddc30000000000000000000000004200000000000000000000000000000000000006000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda029130000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000055967ebbc63c0000000000000000000000000000000000000000000000000000000000051429000000000000000000000000000000000000000000000000000054bb63ddbc9200000000000000000000000000000000000000000000000000000000000507280000000000000000000000006f19da51d488926c007b9ebaa5968291a2ec6a6300000000000000000000000000000000000000000000000000000000691223fa" as `0x${string}`,
-                // data: "0x" as `0x${string}`,
+                data: aerodromeAddLiquidityCalldata,
                 tokens: [
                     {
                         token: WETH_ADDRESS,
-                        index: 100
+                        index: AERODROME_AMOUNT_A_OFFSET
                     },
                     {
                         token: USDC_ADDRESS,
-                        index: 132
+                        index: AERODROME_AMOUNT_B_OFFSET
                     }
                 ]
             },
@@ -1017,6 +1152,13 @@ sendBatchBtn.addEventListener('click', async () => {
         ]
 
         showStatus('Checking token approvals...', 'info');
+
+        const tokenManagerAddress = await publicClient.readContract({
+            address: BEEFY_ZAP_ROUTER,
+            abi: BEEFY_ROUTER_MINI_ABI,
+            functionName: 'tokenManager'
+        }) as Address;
+        console.log('Beefy token manager:', tokenManagerAddress);
 
         // Verify we're on the correct chain
         const chainId = await publicClient.getChainId();
@@ -1048,9 +1190,9 @@ sendBatchBtn.addEventListener('click', async () => {
                 address: USDC_ADDRESS,
                 abi: USDC_ABI,
                 functionName: 'allowance',
-                args: [connectedAddress, BEEFY_ZAP_ROUTER]
+                args: [connectedAddress, tokenManagerAddress]
             });
-            console.log(`Token ${USDC_ADDRESS} allowance to Beefy Zap Router:`, allowance.toString());
+            console.log(`Token ${USDC_ADDRESS} allowance to Beefy Token Manager:`, allowance.toString());
         } catch (error: any) {
             console.error('Error reading allowance:', error);
             showStatus(
@@ -1059,6 +1201,26 @@ sendBatchBtn.addEventListener('click', async () => {
                 'info'
             );
             allowance = 0n;
+        }
+
+        try {
+            const usdcBalance = await publicClient.readContract({
+                address: USDC_ADDRESS,
+                abi: USDC_ABI,
+                functionName: 'balanceOf',
+                args: [connectedAddress]
+            });
+            if (usdcBalance < order.inputs[0].amount) {
+                showStatus(
+                    `❌ Insufficient USDC balance. Need ${order.inputs[0].amount.toString()} but only have ${usdcBalance.toString()}`,
+                    'error'
+                );
+                sendBatchBtn.disabled = false;
+                return;
+            }
+        } catch (balanceError: any) {
+            console.error('Error checking USDC balance:', balanceError);
+            showStatus(`⚠️ Could not verify USDC balance: ${balanceError.message || 'Unknown error'}`, 'info');
         }
 
         if (allowance < AMOUNT) {
@@ -1074,7 +1236,7 @@ sendBatchBtn.addEventListener('click', async () => {
                     address: USDC_ADDRESS,
                     abi: USDC_ABI,
                     functionName: 'approve',
-                    args: [BEEFY_ZAP_ROUTER, AMOUNT]
+                    args: [tokenManagerAddress, AMOUNT]
                 });
 
                 showStatus(
@@ -1148,15 +1310,12 @@ sendBatchBtn.addEventListener('click', async () => {
         const nativeInput = order.inputs.find(input => input.token === ZERO_ADDRESS);
 
         const options = {
-            // gas: gasEstimate ?? 1000000n, // Use estimated gas or default
-            maxFeePerGas: 12665890n,
-            maxPriorityFeePerGas: 10000000n,
             account: order.user,
             chain: publicClient.chain,
             value: nativeInput ? nativeInput.amount : undefined
         }
 
-        console.debug('executeOrder', { order: order, steps: route, options });
+        console.debug('executeOrder', { order: order, steps: route });
         const executeOrderHash = await beefyZapRouterContract.write.executeOrder([order, route], options);
 
         // // Execute the order with viem
@@ -1252,4 +1411,3 @@ declare global {
         };
     }
 }
-
