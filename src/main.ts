@@ -1260,188 +1260,513 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
 
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600 * 2);
 
-        const buildResult = mode === 'deposit'
-            ? await buildDepositZap(connectedAddress, deadline)
-            : await buildWithdrawZap(publicClient, connectedAddress, deadline);
+        // For deposit mode, build four identical deposit zaps for atomic batching
+        if (mode === 'deposit') {
+            const buildResult1 = await buildDepositZap(connectedAddress, deadline);
+            const buildResult2 = await buildDepositZap(connectedAddress, deadline);
+            const buildResult3 = await buildDepositZap(connectedAddress, deadline);
+            const buildResult4 = await buildDepositZap(connectedAddress, deadline);
 
-        const { order, route, inputToken, inputAmount } = buildResult;
+            // Use the first build result for approval checks (we'll need 4x the amount)
+            const { order: order1, route: route1, inputToken, inputAmount } = buildResult1;
+            const { order: order2, route: route2 } = buildResult2;
+            const { order: order3, route: route3 } = buildResult3;
+            const { order: order4, route: route4 } = buildResult4;
 
-        showStatus('Checking token approvals...', 'info');
+            // Total amount needed is 4x for four deposits
+            const totalInputAmount = inputAmount * 4n;
 
-        const tokenManagerAddress = await publicClient.readContract({
-            address: BEEFY_ZAP_ROUTER,
-            abi: BEEFY_ROUTER_MINI_ABI,
-            functionName: 'tokenManager'
-        }) as Address;
-        console.log('Beefy token manager:', tokenManagerAddress);
+            showStatus('Checking token approvals...', 'info');
 
-        const chainId = await publicClient.getChainId();
-        const expectedChainId = MAINNET ? base.id : baseSepolia.id;
-        if (chainId !== expectedChainId) {
-            showStatus(
-                `❌ Wrong network! Expected chain ID ${expectedChainId}, but connected to ${chainId}`,
-                'error'
-            );
-            toggleButtons(false);
-            return;
-        }
+            const tokenManagerAddress = await publicClient.readContract({
+                address: BEEFY_ZAP_ROUTER,
+                abi: BEEFY_ROUTER_MINI_ABI,
+                functionName: 'tokenManager'
+            }) as Address;
+            console.log('Beefy token manager:', tokenManagerAddress);
 
-        const code = await publicClient.getBytecode({ address: inputToken });
-        if (!code || code === '0x') {
-            showStatus(
-                `❌ No contract found at token address: ${inputToken}\n` +
-                `Please verify you're on the correct network (${MAINNET ? 'Base Mainnet' : 'Base Sepolia'})`,
-                'error'
-            );
-            toggleButtons(false);
-            return;
-        }
-
-        let allowance: bigint;
-        try {
-            allowance = await publicClient.readContract({
-                address: inputToken,
-                abi: USDC_ABI,
-                functionName: 'allowance',
-                args: [connectedAddress, tokenManagerAddress]
-            });
-            console.log(`Token ${inputToken} allowance to Beefy Token Manager:`, allowance.toString());
-        } catch (error: any) {
-            console.error('Error reading allowance:', error);
-            showStatus(
-                `⚠️ Could not read allowance for ${inputToken}. Assuming 0 and requesting approval...\n` +
-                `Error: ${error.message || 'Unknown error'}`,
-                'info'
-            );
-            allowance = 0n;
-        }
-
-        try {
-            const balance = await publicClient.readContract({
-                address: inputToken,
-                abi: USDC_ABI,
-                functionName: 'balanceOf',
-                args: [connectedAddress]
-            });
-            if (balance < inputAmount) {
+            const chainId = await publicClient.getChainId();
+            const expectedChainId = MAINNET ? base.id : baseSepolia.id;
+            if (chainId !== expectedChainId) {
                 showStatus(
-                    `❌ Insufficient balance for token ${inputToken}.\n` +
-                    `Need ${inputAmount.toString()} but only have ${balance.toString()}`,
+                    `❌ Wrong network! Expected chain ID ${expectedChainId}, but connected to ${chainId}`,
                     'error'
                 );
                 toggleButtons(false);
                 return;
             }
-        } catch (balanceError: any) {
-            console.error('Error checking balance:', balanceError);
-            showStatus(`⚠️ Could not verify balance: ${balanceError.message || 'Unknown error'}`, 'info');
-        }
 
-        if (allowance < inputAmount) {
-            showStatus(
-                `Requesting approval for ${inputAmount.toString()} units of ${inputToken}...
-` +
-                `Current allowance: ${allowance.toString()}`,
-                'info'
-            );
+            const code = await publicClient.getBytecode({ address: inputToken });
+            if (!code || code === '0x') {
+                showStatus(
+                    `❌ No contract found at token address: ${inputToken}\n` +
+                    `Please verify you're on the correct network (${MAINNET ? 'Base Mainnet' : 'Base Sepolia'})`,
+                    'error'
+                );
+                toggleButtons(false);
+                return;
+            }
 
+            let allowance: bigint;
             try {
-                const approveHash = await walletClient.writeContract({
+                allowance = await publicClient.readContract({
                     address: inputToken,
                     abi: USDC_ABI,
-                    functionName: 'approve',
-                    args: [tokenManagerAddress, inputAmount]
+                    functionName: 'allowance',
+                    args: [connectedAddress, tokenManagerAddress]
                 });
+                console.log(`Token ${inputToken} allowance to Beefy Token Manager:`, allowance.toString());
+            } catch (error: any) {
+                console.error('Error reading allowance:', error);
+                showStatus(
+                    `⚠️ Could not read allowance for ${inputToken}. Assuming 0 and requesting approval...\n` +
+                    `Error: ${error.message || 'Unknown error'}`,
+                    'info'
+                );
+                allowance = 0n;
+            }
+
+            try {
+                const balance = await publicClient.readContract({
+                    address: inputToken,
+                    abi: USDC_ABI,
+                    functionName: 'balanceOf',
+                    args: [connectedAddress]
+                });
+                if (balance < totalInputAmount) {
+                    showStatus(
+                        `❌ Insufficient balance for token ${inputToken}.\n` +
+                        `Need ${totalInputAmount.toString()} (for 4 deposits) but only have ${balance.toString()}`,
+                        'error'
+                    );
+                    toggleButtons(false);
+                    return;
+                }
+            } catch (balanceError: any) {
+                console.error('Error checking balance:', balanceError);
+                showStatus(`⚠️ Could not verify balance: ${balanceError.message || 'Unknown error'}`, 'info');
+            }
+
+            if (allowance < totalInputAmount) {
+                showStatus(
+                    `Requesting approval for ${totalInputAmount.toString()} units of ${inputToken} (for 4 deposits)...
+` +
+                    `Current allowance: ${allowance.toString()}`,
+                    'info'
+                );
+
+                try {
+                    const approveHash = await walletClient.writeContract({
+                        address: inputToken,
+                        abi: USDC_ABI,
+                        functionName: 'approve',
+                        args: [tokenManagerAddress, totalInputAmount]
+                    });
+
+                    showStatus(
+                        `Approval transaction submitted: ${approveHash}
+` +
+                        `Waiting for confirmation...`,
+                        'info'
+                    );
+
+                    await publicClient.waitForTransactionReceipt({
+                        hash: approveHash
+                    });
+
+                    showStatus(
+                        `✅ Approval confirmed! Proceeding with batched order execution...`,
+                        'success'
+                    );
+                } catch (approveError: any) {
+                    console.error('Approval error:', approveError);
+                    showStatus(
+                        `❌ Approval failed: ${approveError.message || 'Unknown error'}\n` +
+                        `Please approve tokens manually and try again.`,
+                        'error'
+                    );
+                    toggleButtons(false);
+                    return;
+                }
+            } else {
+                console.log(`Token ${inputToken} has sufficient allowance for 4 deposits`);
+            }
+
+            // Encode all four executeOrder calls
+            const callData1 = encodeFunctionData({
+                abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+                functionName: 'executeOrder',
+                args: [order1, route1]
+            });
+
+            const callData2 = encodeFunctionData({
+                abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+                functionName: 'executeOrder',
+                args: [order2, route2]
+            });
+
+            const callData3 = encodeFunctionData({
+                abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+                functionName: 'executeOrder',
+                args: [order3, route3]
+            });
+
+            const callData4 = encodeFunctionData({
+                abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+                functionName: 'executeOrder',
+                args: [order4, route4]
+            });
+
+            console.log('Encoded function selectors:', {
+                call1: callData1.slice(0, 10),
+                call2: callData2.slice(0, 10),
+                call3: callData3.slice(0, 10),
+                call4: callData4.slice(0, 10)
+            });
+            console.log('Batching 4 identical deposits atomically using EIP-5792');
+
+            showStatus('Checking EIP-5792 capabilities...', 'info');
+
+            // Check if wallet supports EIP-5792
+            const currentChainId = await publicClient.getChainId();
+            let capabilities: any;
+            try {
+                capabilities = await walletClient.getCapabilities();
+            } catch (error: any) {
+                console.warn('getCapabilities failed:', error);
+                showStatus(
+                    `⚠️ EIP-5792 not supported by wallet: ${error.message}\n` +
+                    `Please use a wallet that supports EIP-5792 (wallet_sendCalls)`,
+                    'error'
+                );
+                toggleButtons(false);
+                return;
+            }
+
+            if (!capabilities || !capabilities[currentChainId]) {
+                showStatus(
+                    `❌ EIP-5792 not supported for chain ID ${currentChainId}\n` +
+                    `Please use a wallet that supports EIP-5792 on this network`,
+                    'error'
+                );
+                toggleButtons(false);
+                return;
+            }
+
+            const chainCapabilities = capabilities[currentChainId];
+            const atomicStatusSupported = chainCapabilities.atomic &&
+                (chainCapabilities.atomic.status === 'ready' || chainCapabilities.atomic.status === 'supported');
+
+            if (!atomicStatusSupported) {
+                showStatus(
+                    `❌ Atomic batching not supported for chain ID ${currentChainId}\n` +
+                    `Status: ${chainCapabilities.atomic?.status || 'not available'}`,
+                    'error'
+                );
+                toggleButtons(false);
+                return;
+            }
+
+            console.log('EIP-5792 atomic batching is supported:', {
+                chainId: currentChainId,
+                atomicStatus: chainCapabilities.atomic.status,
+            });
+
+            showStatus('Preparing batched transaction with EIP-5792...', 'info');
+
+            // Prepare EIP-5792 sendCalls parameters
+            const nativeInput1 = order1.inputs.find(input => input.token === ZERO_ADDRESS);
+            const nativeInput2 = order2.inputs.find(input => input.token === ZERO_ADDRESS);
+            const nativeInput3 = order3.inputs.find(input => input.token === ZERO_ADDRESS);
+            const nativeInput4 = order4.inputs.find(input => input.token === ZERO_ADDRESS);
+
+            const calls = [
+                {
+                    to: BEEFY_ZAP_ROUTER as `0x${string}`,
+                    data: callData1,
+                    value: nativeInput1?.amount || 0n,
+                },
+                {
+                    to: BEEFY_ZAP_ROUTER as `0x${string}`,
+                    data: callData2,
+                    value: nativeInput2?.amount || 0n,
+                },
+                {
+                    to: BEEFY_ZAP_ROUTER as `0x${string}`,
+                    data: callData3,
+                    value: nativeInput3?.amount || 0n,
+                },
+                {
+                    to: BEEFY_ZAP_ROUTER as `0x${string}`,
+                    data: callData4,
+                    value: nativeInput4?.amount || 0n,
+                },
+            ] as const;
+
+            const sendCallsParams = {
+                calls,
+            };
+
+            console.debug('EIP-5792 sendCalls', { calls });
+
+            showStatus('Submitting batched transaction (4 deposits) via EIP-5792...', 'info');
+
+            try {
+                const result = await walletClient.sendCalls(sendCallsParams);
+                console.log('EIP-5792 sendCalls result:', result);
+
+                // sendCalls returns an ID or hash, we need to wait for the transaction
+                // If it's a hash, we can wait for receipt directly
+                // If it's an ID, we might need to use getCallsStatus
+                let batchHash: `0x${string}`;
+                const resultStr = String(result);
+                if (resultStr.startsWith('0x')) {
+                    // It's a transaction hash
+                    batchHash = resultStr as `0x${string}`;
+                } else {
+                    // It's a calls ID, try to get status
+                    showStatus(
+                        `Batched transaction submitted with ID: ${resultStr}\n` +
+                        `Checking status...`,
+                        'info'
+                    );
+
+                    // Try to get the transaction hash from status
+                    try {
+                        const status = await walletClient.getCallsStatus({ id: resultStr });
+                        if (status.receipts && status.receipts.length > 0 && status.receipts[0].transactionHash) {
+                            batchHash = status.receipts[0].transactionHash;
+                        } else {
+                            // Wait a bit and check again
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+                            const statusRetry = await walletClient.getCallsStatus({ id: resultStr });
+                            if (statusRetry.receipts && statusRetry.receipts.length > 0 && statusRetry.receipts[0].transactionHash) {
+                                batchHash = statusRetry.receipts[0].transactionHash;
+                            } else {
+                                throw new Error('Could not retrieve transaction hash from calls status');
+                            }
+                        }
+                    } catch (statusError: any) {
+                        showStatus(
+                            `⚠️ Could not get transaction status: ${statusError.message}\n` +
+                            `Calls ID: ${resultStr}`,
+                            'error'
+                        );
+                        toggleButtons(false);
+                        return;
+                    }
+                }
 
                 showStatus(
-                    `Approval transaction submitted: ${approveHash}
-` +
+                    `Batched transaction submitted: ${batchHash}\n` +
                     `Waiting for confirmation...`,
                     'info'
                 );
 
-                await publicClient.waitForTransactionReceipt({
-                    hash: approveHash
+                const batchReceipt = await publicClient.waitForTransactionReceipt({
+                    hash: batchHash
                 });
+                console.log('Batched transaction receipt:', batchReceipt);
 
                 showStatus(
-                    `✅ Approval confirmed! Proceeding with order execution...`,
+                    `✅ Batched transaction confirmed! Hash: ${batchReceipt.transactionHash}\n\n` +
+                    `Block: ${batchReceipt.blockNumber}\n` +
+                    `Gas used: ${batchReceipt.gasUsed.toString()}\n` +
+                    `Executed 4 deposits atomically via EIP-5792`,
                     'success'
                 );
-            } catch (approveError: any) {
-                console.error('Approval error:', approveError);
+            } catch (sendCallsError: any) {
+                console.error('EIP-5792 sendCalls error:', sendCallsError);
                 showStatus(
-                    `❌ Approval failed: ${approveError.message || 'Unknown error'}\n` +
-                    `Please approve tokens manually and try again.`,
+                    `❌ Batched transaction failed: ${sendCallsError.message || 'Unknown error'}\n` +
+                    `Please ensure your wallet supports EIP-5792`,
                     'error'
                 );
                 toggleButtons(false);
                 return;
             }
         } else {
-            console.log(`Token ${inputToken} has sufficient allowance`);
-        }
+            // Withdraw mode - keep original logic
+            const buildResult = await buildWithdrawZap(publicClient, connectedAddress, deadline);
+            const { order, route, inputToken, inputAmount } = buildResult;
 
-        const encodedData = encodeFunctionData({
-            abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
-            functionName: 'executeOrder',
-            args: [order, route]
-        });
-        console.log('Encoded function selector:', encodedData.slice(0, 10));
-        console.log('Using executeOrder (payable, no Permit2)');
+            showStatus('Checking token approvals...', 'info');
 
-        showStatus('Preparing transaction with viem...', 'info');
-
-        try {
-            const gasEstimate = await publicClient.estimateContractGas({
+            const tokenManagerAddress = await publicClient.readContract({
                 address: BEEFY_ZAP_ROUTER,
+                abi: BEEFY_ROUTER_MINI_ABI,
+                functionName: 'tokenManager'
+            }) as Address;
+            console.log('Beefy token manager:', tokenManagerAddress);
+
+            const chainId = await publicClient.getChainId();
+            const expectedChainId = MAINNET ? base.id : baseSepolia.id;
+            if (chainId !== expectedChainId) {
+                showStatus(
+                    `❌ Wrong network! Expected chain ID ${expectedChainId}, but connected to ${chainId}`,
+                    'error'
+                );
+                toggleButtons(false);
+                return;
+            }
+
+            const code = await publicClient.getBytecode({ address: inputToken });
+            if (!code || code === '0x') {
+                showStatus(
+                    `❌ No contract found at token address: ${inputToken}\n` +
+                    `Please verify you're on the correct network (${MAINNET ? 'Base Mainnet' : 'Base Sepolia'})`,
+                    'error'
+                );
+                toggleButtons(false);
+                return;
+            }
+
+            let allowance: bigint;
+            try {
+                allowance = await publicClient.readContract({
+                    address: inputToken,
+                    abi: USDC_ABI,
+                    functionName: 'allowance',
+                    args: [connectedAddress, tokenManagerAddress]
+                });
+                console.log(`Token ${inputToken} allowance to Beefy Token Manager:`, allowance.toString());
+            } catch (error: any) {
+                console.error('Error reading allowance:', error);
+                showStatus(
+                    `⚠️ Could not read allowance for ${inputToken}. Assuming 0 and requesting approval...\n` +
+                    `Error: ${error.message || 'Unknown error'}`,
+                    'info'
+                );
+                allowance = 0n;
+            }
+
+            try {
+                const balance = await publicClient.readContract({
+                    address: inputToken,
+                    abi: USDC_ABI,
+                    functionName: 'balanceOf',
+                    args: [connectedAddress]
+                });
+                if (balance < inputAmount) {
+                    showStatus(
+                        `❌ Insufficient balance for token ${inputToken}.\n` +
+                        `Need ${inputAmount.toString()} but only have ${balance.toString()}`,
+                        'error'
+                    );
+                    toggleButtons(false);
+                    return;
+                }
+            } catch (balanceError: any) {
+                console.error('Error checking balance:', balanceError);
+                showStatus(`⚠️ Could not verify balance: ${balanceError.message || 'Unknown error'}`, 'info');
+            }
+
+            if (allowance < inputAmount) {
+                showStatus(
+                    `Requesting approval for ${inputAmount.toString()} units of ${inputToken}...
+` +
+                    `Current allowance: ${allowance.toString()}`,
+                    'info'
+                );
+
+                try {
+                    const approveHash = await walletClient.writeContract({
+                        address: inputToken,
+                        abi: USDC_ABI,
+                        functionName: 'approve',
+                        args: [tokenManagerAddress, inputAmount]
+                    });
+
+                    showStatus(
+                        `Approval transaction submitted: ${approveHash}
+` +
+                        `Waiting for confirmation...`,
+                        'info'
+                    );
+
+                    await publicClient.waitForTransactionReceipt({
+                        hash: approveHash
+                    });
+
+                    showStatus(
+                        `✅ Approval confirmed! Proceeding with order execution...`,
+                        'success'
+                    );
+                } catch (approveError: any) {
+                    console.error('Approval error:', approveError);
+                    showStatus(
+                        `❌ Approval failed: ${approveError.message || 'Unknown error'}\n` +
+                        `Please approve tokens manually and try again.`,
+                        'error'
+                    );
+                    toggleButtons(false);
+                    return;
+                }
+            } else {
+                console.log(`Token ${inputToken} has sufficient allowance`);
+            }
+
+            const encodedData = encodeFunctionData({
                 abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
                 functionName: 'executeOrder',
-                args: [order, route],
-                account: connectedAddress
+                args: [order, route]
             });
-            console.log('Gas estimate:', gasEstimate.toString());
-            showStatus(`Gas estimated: ${gasEstimate.toString()}`, 'info');
-        } catch (gasError: any) {
-            console.warn('Gas estimation failed:', gasError);
+            console.log('Encoded function selector:', encodedData.slice(0, 10));
+            console.log('Using executeOrder (payable, no Permit2)');
+
+            showStatus('Preparing transaction with viem...', 'info');
+
+            try {
+                const gasEstimate = await publicClient.estimateContractGas({
+                    address: BEEFY_ZAP_ROUTER,
+                    abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+                    functionName: 'executeOrder',
+                    args: [order, route],
+                    account: connectedAddress
+                });
+                console.log('Gas estimate:', gasEstimate.toString());
+                showStatus(`Gas estimated: ${gasEstimate.toString()}`, 'info');
+            } catch (gasError: any) {
+                console.warn('Gas estimation failed:', gasError);
+                showStatus(
+                    `⚠️ Gas estimation failed: ${gasError.message}\n` +
+                    `Proceeding with default gas limit...`,
+                    'info'
+                );
+            }
+
+            showStatus('Submitting transaction...', 'info');
+
+            const beefyZapRouterContract = getContract({ address: BEEFY_ZAP_ROUTER, abi: BEEFY_ZAP_EXECUTE_ORDER_ABI, client: walletClient });
+            const nativeInput = order.inputs.find(input => input.token === ZERO_ADDRESS);
+
+            const options = {
+                account: order.user,
+                chain: publicClient.chain,
+                value: nativeInput ? nativeInput.amount : undefined
+            };
+
+            console.debug('executeOrder', { order: order, steps: route });
+            const executeOrderHash = await beefyZapRouterContract.write.executeOrder([order, route], options);
+
             showStatus(
-                `⚠️ Gas estimation failed: ${gasError.message}\n` +
-                `Proceeding with default gas limit...`,
+                `Transaction submitted: ${executeOrderHash}\n` +
+                `Waiting for confirmation...`,
                 'info'
             );
+
+            const executeOrderReceipt = await publicClient.waitForTransactionReceipt({
+                hash: executeOrderHash
+            });
+            console.log('Execute order receipt:', executeOrderReceipt);
+
+            showStatus(
+                `✅ Transaction confirmed! Hash: ${executeOrderReceipt.transactionHash}\n\n` +
+                `Block: ${executeOrderReceipt.blockNumber}\n` +
+                `Gas used: ${executeOrderReceipt.gasUsed.toString()}`,
+                'success'
+            );
         }
-
-        showStatus('Submitting transaction...', 'info');
-
-        const beefyZapRouterContract = getContract({ address: BEEFY_ZAP_ROUTER, abi: BEEFY_ZAP_EXECUTE_ORDER_ABI, client: walletClient });
-        const nativeInput = order.inputs.find(input => input.token === ZERO_ADDRESS);
-
-        const options = {
-            account: order.user,
-            chain: publicClient.chain,
-            value: nativeInput ? nativeInput.amount : undefined
-        };
-
-        console.debug('executeOrder', { order: order, steps: route });
-        const executeOrderHash = await beefyZapRouterContract.write.executeOrder([order, route], options);
-
-        showStatus(
-            `Transaction submitted: ${executeOrderHash}\n` +
-            `Waiting for confirmation...`,
-            'info'
-        );
-
-        const executeOrderReceipt = await publicClient.waitForTransactionReceipt({
-            hash: executeOrderHash
-        });
-        console.log('Execute order receipt:', executeOrderReceipt);
-
-        showStatus(
-            `✅ Transaction confirmed! Hash: ${executeOrderReceipt.transactionHash}\n\n` +
-            `Block: ${executeOrderReceipt.blockNumber}\n` +
-            `Gas used: ${executeOrderReceipt.gasUsed.toString()}`,
-            'success'
-        );
     } catch (error: any) {
         console.error('Batch transaction error:', error);
         showStatus(
