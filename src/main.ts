@@ -4,8 +4,13 @@ import { baseSepolia, base } from 'viem/chains'
 const MAINNET = true;
 
 const USDC_ADDRESS: Address = MAINNET ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
-const VAULT_ADDRESS: Address = '0x09139a80454609b69700836a9ee12db4b5dbb15f';
+const MODERATE_VAULT_ADDRESS: Address = '0x09139a80454609b69700836a9ee12db4b5dbb15f';
+const RISKY_VAULT_ADDRESS: Address = '0x06a613d3a056d4b04d7523c11d82c67bebf9d850';
+// const MEANINGFULLY_RISKY_VAULT_ADDRESS: Address = '0x0000000000000000000000000000000000000000';
 const WETH_USDC_ADDRESS: Address = '0xcdac0d6c6c59727a65f871236188350531885c43';
+const AERO_WSTETH: Address = '0x82a0c1a0d4EF0c0cA3cFDA3AD1AA78309Cc6139b';
+const AERO_ADDRESS: Address = '0x940181a94A35A4569E4529A3CDfB74e38FD98631';
+const WSTETH_ADDRESS: Address = '0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452';
 const WETH_ADDRESS: Address = '0x4200000000000000000000000000000000000006';
 const ZERO_ADDRESS: Address = '0x0000000000000000000000000000000000000000';
 const AERODROME_ROUTER: Address = '0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43';
@@ -978,7 +983,7 @@ type ZapBuildResult = {
     inputAmount: bigint;
 };
 
-async function buildDepositZap(connectedAddress: Address, deadline: bigint): Promise<ZapBuildResult> {
+async function buildRiskyDepositZap(connectedAddress: Address, deadline: bigint): Promise<ZapBuildResult> {
     const order = {
         inputs: [
             {
@@ -988,7 +993,133 @@ async function buildDepositZap(connectedAddress: Address, deadline: bigint): Pro
         ],
         outputs: [
             {
-                token: VAULT_ADDRESS,
+                token: RISKY_VAULT_ADDRESS,
+                minOutputAmount: 0n
+            },
+            {
+                token: AERO_WSTETH,
+                minOutputAmount: 0n
+            },
+            {
+                token: USDC_ADDRESS,
+                minOutputAmount: 0n
+            },
+            {
+                token: AERO_ADDRESS,
+                minOutputAmount: 0n
+            },
+            {
+                token: WSTETH_ADDRESS,
+                minOutputAmount: 0n
+            }
+        ],
+        relay: {
+            target: ZERO_ADDRESS,
+            value: 0n,
+            data: '0x' as `0x${string}`
+        },
+        user: connectedAddress,
+        recipient: connectedAddress
+    };
+
+    const usdcIn = order.inputs[0].amount;
+    const half = usdcIn / 2n;
+    const swapAmount = half === 0n ? usdcIn : half;
+
+    // Swap 1: Half of USDC for AERO
+    const kyberStepAero = await kyberEncodeSwap({
+        tokenIn: USDC_ADDRESS,
+        tokenOut: AERO_ADDRESS,
+        amountIn: swapAmount,
+        zapRouter: BEEFY_ZAP_ROUTER,
+        slippageBps: 50,
+        deadlineSec: Number(deadline),
+        clientId: KYBER_CLIENT_ID,
+    });
+
+    // Swap 2: Other half of USDC for WSTETH
+    const kyberStepWsteth = await kyberEncodeSwap({
+        tokenIn: USDC_ADDRESS,
+        tokenOut: WSTETH_ADDRESS,
+        amountIn: swapAmount,
+        zapRouter: BEEFY_ZAP_ROUTER,
+        slippageBps: 50,
+        deadlineSec: Number(deadline),
+        clientId: KYBER_CLIENT_ID,
+    });
+
+    // Add liquidity to AERO/WSTETH pool
+    const {
+        amountAOffset: AERODROME_AMOUNT_A_OFFSET,
+        amountBOffset: AERODROME_AMOUNT_B_OFFSET,
+        data: aerodromeAddLiquidityCalldata,
+    } = locateAerodromeOffsets(AERO_ADDRESS, WSTETH_ADDRESS, false, BEEFY_ZAP_ROUTER, deadline);
+
+    const route = [
+        {
+            target: kyberStepAero.routerAddress,
+            value: kyberStepAero.value,
+            data: kyberStepAero.data,
+            tokens: [
+                {
+                    token: USDC_ADDRESS,
+                    index: -1
+                },
+            ]
+        },
+        {
+            target: kyberStepWsteth.routerAddress,
+            value: kyberStepWsteth.value,
+            data: kyberStepWsteth.data,
+            tokens: [
+                {
+                    token: USDC_ADDRESS,
+                    index: -1
+                },
+            ]
+        },
+        {
+            target: AERODROME_ROUTER,
+            value: 0n,
+            data: aerodromeAddLiquidityCalldata,
+            tokens: [
+                {
+                    token: AERO_ADDRESS,
+                    index: AERODROME_AMOUNT_A_OFFSET
+                },
+                {
+                    token: WSTETH_ADDRESS,
+                    index: AERODROME_AMOUNT_B_OFFSET
+                }
+            ]
+        },
+        {
+            target: RISKY_VAULT_ADDRESS,
+            value: 0n,
+            data: "0xde5f6268" as `0x${string}`,
+            tokens: [
+                {
+                    token: AERO_WSTETH,
+                    index: -1
+                }
+            ]
+        }
+    ];
+
+    return { order, route, inputToken: USDC_ADDRESS, inputAmount: order.inputs[0].amount };
+}
+
+async function buildModerateDepositZap(connectedAddress: Address, deadline: bigint): Promise<ZapBuildResult> {
+    const order = {
+        inputs: [
+            {
+                token: USDC_ADDRESS,
+                amount: AMOUNT
+            }
+        ],
+        outputs: [
+            {
+                token: MODERATE_VAULT_ADDRESS,
                 minOutputAmount: 0n
             },
             {
@@ -1060,7 +1191,7 @@ async function buildDepositZap(connectedAddress: Address, deadline: bigint): Pro
             ]
         },
         {
-            target: VAULT_ADDRESS,
+            target: MODERATE_VAULT_ADDRESS,
             value: 0n,
             data: "0xde5f6268" as `0x${string}`,
             tokens: [
@@ -1101,9 +1232,9 @@ function buildMetalosDeposit(amount: bigint): {
     };
 }
 
-async function buildWithdrawZap(publicClient: any, connectedAddress: Address, deadline: bigint): Promise<ZapBuildResult> {
+async function buildWithdrawZap(publicClient: any, connectedAddress: Address, vaultAddress: Address, deadline: bigint): Promise<ZapBuildResult> {
     const shareBalance = await publicClient.readContract({
-        address: VAULT_ADDRESS,
+        address: vaultAddress,
         abi: USDC_ABI,
         functionName: 'balanceOf',
         args: [connectedAddress]
@@ -1116,7 +1247,7 @@ async function buildWithdrawZap(publicClient: any, connectedAddress: Address, de
     const order = {
         inputs: [
             {
-                token: VAULT_ADDRESS,
+                token: vaultAddress,
                 amount: shareBalance
             }
         ],
@@ -1152,12 +1283,12 @@ async function buildWithdrawZap(publicClient: any, connectedAddress: Address, de
 
     const route = [
         {
-            target: VAULT_ADDRESS,
+            target: vaultAddress,
             value: 0n,
             data: withdrawCalldata,
             tokens: [
                 {
-                    token: VAULT_ADDRESS,
+                    token: vaultAddress,
                     index: -1,
                 },
             ],
@@ -1175,7 +1306,7 @@ async function buildWithdrawZap(publicClient: any, connectedAddress: Address, de
         },
     ];
 
-    return { order, route, inputToken: VAULT_ADDRESS, inputAmount: shareBalance };
+    return { order, route, inputToken: vaultAddress, inputAmount: shareBalance };
 }
 
 function locateAerodromeRemoveLiquidityOffsets(tokenA: Address, tokenB: Address, stable: boolean, to: Address, deadline: bigint) {
@@ -1298,13 +1429,13 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
             const metalosDeposit = buildMetalosDeposit(AMOUNT);
 
             // Calls 2-4: Beefy zap router deposits
-            const buildResult2 = await buildDepositZap(connectedAddress, deadline);
-            const buildResult3 = await buildDepositZap(connectedAddress, deadline);
-            const buildResult4 = await buildDepositZap(connectedAddress, deadline);
+            const buildResult2 = await buildModerateDepositZap(connectedAddress, deadline);
+            const buildResult3 = await buildRiskyDepositZap(connectedAddress, deadline);
+            // const buildResult4 = await buildMeaningfullyRiskyDepositZap(connectedAddress, deadline);
 
             const { order: order2, route: route2, inputToken: beefyInputToken, inputAmount: beefyInputAmount } = buildResult2;
             const { order: order3, route: route3 } = buildResult3;
-            const { order: order4, route: route4 } = buildResult4;
+            // const { order: order4, route: route4 } = buildResult4;
 
             // Total amount needed: 1x for Metalos + 3x for Beefy
             const metalosAmount = metalosDeposit.inputAmount;
@@ -1494,17 +1625,17 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
                 args: [order3, route3]
             });
 
-            const callData4 = encodeFunctionData({
-                abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
-                functionName: 'executeOrder',
-                args: [order4, route4]
-            });
+            // const callData4 = encodeFunctionData({
+            //     abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+            //     functionName: 'executeOrder',
+            //     args: [order4, route4]
+            // });
 
             console.log('Encoded function selectors:', {
                 call1: callData1.slice(0, 10) + ' (Metalos deposit)',
                 call2: callData2.slice(0, 10) + ' (Beefy executeOrder)',
                 call3: callData3.slice(0, 10) + ' (Beefy executeOrder)',
-                call4: callData4.slice(0, 10) + ' (Beefy executeOrder)'
+                // call4: callData4.slice(0, 10) + ' (Beefy executeOrder)'
             });
             console.log('Batching 1 Metalos deposit + 3 Beefy deposits atomically using EIP-5792');
 
@@ -1560,29 +1691,33 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
             // Prepare EIP-5792 sendCalls parameters
             const nativeInput2 = order2.inputs.find(input => input.token === ZERO_ADDRESS);
             const nativeInput3 = order3.inputs.find(input => input.token === ZERO_ADDRESS);
-            const nativeInput4 = order4.inputs.find(input => input.token === ZERO_ADDRESS);
+            // const nativeInput4 = order4.inputs.find(input => input.token === ZERO_ADDRESS);
 
             const calls = [
-                {
-                    to: metalosDeposit.to as `0x${string}`,
-                    data: callData1,
-                    value: metalosDeposit.value,
-                },
-                {
-                    to: BEEFY_ZAP_ROUTER as `0x${string}`,
-                    data: callData2,
-                    value: nativeInput2?.amount || 0n,
-                },
+                // // safe
+                // {
+                //     to: metalosDeposit.to as `0x${string}`,
+                //     data: callData1,
+                //     value: metalosDeposit.value,
+                // },
+                // // moderate
+                // {
+                //     to: BEEFY_ZAP_ROUTER as `0x${string}`,
+                //     data: callData2,
+                //     value: nativeInput2?.amount || 0n,
+                // },
+                // risky
                 {
                     to: BEEFY_ZAP_ROUTER as `0x${string}`,
                     data: callData3,
                     value: nativeInput3?.amount || 0n,
                 },
-                {
-                    to: BEEFY_ZAP_ROUTER as `0x${string}`,
-                    data: callData4,
-                    value: nativeInput4?.amount || 0n,
-                },
+                // // meaningfully risky
+                // {
+                //     to: BEEFY_ZAP_ROUTER as `0x${string}`,
+                //     data: callData4,
+                //     value: nativeInput4?.amount || 0n,
+                // },
             ];
 
             const sendCallsParams = {
@@ -1711,7 +1846,7 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
             }
         } else {
             // Withdraw mode - keep original logic
-            const buildResult = await buildWithdrawZap(publicClient, connectedAddress, deadline);
+            const buildResult = await buildWithdrawZap(publicClient, connectedAddress, MODERATE_VAULT_ADDRESS, deadline);
             const { order, route, inputToken, inputAmount } = buildResult;
 
             showStatus('Checking token approvals...', 'info');
