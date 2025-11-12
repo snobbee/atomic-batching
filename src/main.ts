@@ -1563,11 +1563,11 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
             const nativeInput4 = order4.inputs.find(input => input.token === ZERO_ADDRESS);
 
             const calls = [
-                // {
-                //     to: metalosDeposit.to as `0x${string}`,
-                //     data: callData1,
-                //     value: metalosDeposit.value,
-                // },
+                {
+                    to: metalosDeposit.to as `0x${string}`,
+                    data: callData1,
+                    value: metalosDeposit.value,
+                },
                 {
                     to: BEEFY_ZAP_ROUTER as `0x${string}`,
                     data: callData2,
