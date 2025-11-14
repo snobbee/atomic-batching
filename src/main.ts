@@ -12,6 +12,8 @@ const AERO_WSTETH: Address = '0x82a0c1a0d4EF0c0cA3cFDA3AD1AA78309Cc6139b';
 const AERO_ADDRESS: Address = '0x940181a94A35A4569E4529A3CDfB74e38FD98631';
 const WSTETH_ADDRESS: Address = '0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452';
 const WETH_ADDRESS: Address = '0x4200000000000000000000000000000000000006';
+const CBBTC_ADDRESS: Address = '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf';
+const WETH_CBBTC_LP_ADDRESS: Address = '0x22aee3699b6a0fed71490c103bd4e5f3309891d5';
 const ZERO_ADDRESS: Address = '0x0000000000000000000000000000000000000000';
 const AERODROME_ROUTER: Address = '0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43';
 const METALOS_VAULT_ADDRESS: Address = '0xf3c4db91f380963e00caa4ac1f0508259c9a3d3a'; // TODO: Update with actual Metalos vault address
@@ -1206,6 +1208,117 @@ async function buildModerateDepositZap(connectedAddress: Address, deadline: bigi
     return { order, route, inputToken: USDC_ADDRESS, inputAmount: order.inputs[0].amount };
 }
 
+async function buildWETHCBBTCDepositZap(connectedAddress: Address, deadline: bigint): Promise<ZapBuildResult> {
+    const order = {
+        inputs: [
+            {
+                token: USDC_ADDRESS,
+                amount: AMOUNT
+            }
+        ],
+        outputs: [
+            {
+                token: WETH_CBBTC_LP_ADDRESS,
+                minOutputAmount: 0n
+            },
+            {
+                token: USDC_ADDRESS,
+                minOutputAmount: 0n
+            },
+            {
+                token: WETH_ADDRESS,
+                minOutputAmount: 0n
+            },
+            {
+                token: CBBTC_ADDRESS,
+                minOutputAmount: 0n
+            }
+        ],
+        relay: {
+            target: ZERO_ADDRESS,
+            value: 0n,
+            data: '0x' as `0x${string}`
+        },
+        user: connectedAddress,
+        recipient: connectedAddress
+    };
+
+    const usdcIn = order.inputs[0].amount;
+    const half = usdcIn / 2n;
+    const swapAmount = half === 0n ? usdcIn : half;
+
+    // Swap 1: Half of USDC for WETH
+    const kyberStepWeth = await kyberEncodeSwap({
+        tokenIn: USDC_ADDRESS,
+        tokenOut: WETH_ADDRESS,
+        amountIn: swapAmount,
+        zapRouter: BEEFY_ZAP_ROUTER,
+        slippageBps: 50,
+        deadlineSec: Number(deadline),
+        clientId: KYBER_CLIENT_ID,
+    });
+
+    // Swap 2: Other half of USDC for cbBTC
+    const kyberStepCbbtc = await kyberEncodeSwap({
+        tokenIn: USDC_ADDRESS,
+        tokenOut: CBBTC_ADDRESS,
+        amountIn: swapAmount,
+        zapRouter: BEEFY_ZAP_ROUTER,
+        slippageBps: 50,
+        deadlineSec: Number(deadline),
+        clientId: KYBER_CLIENT_ID,
+    });
+
+    // Add liquidity to WETH/cbBTC pool
+    const {
+        amountAOffset: AERODROME_AMOUNT_A_OFFSET,
+        amountBOffset: AERODROME_AMOUNT_B_OFFSET,
+        data: aerodromeAddLiquidityCalldata,
+    } = locateAerodromeOffsets(WETH_ADDRESS, CBBTC_ADDRESS, false, BEEFY_ZAP_ROUTER, deadline);
+
+    const route = [
+        {
+            target: kyberStepWeth.routerAddress,
+            value: kyberStepWeth.value,
+            data: kyberStepWeth.data,
+            tokens: [
+                {
+                    token: USDC_ADDRESS,
+                    index: -1
+                },
+            ]
+        },
+        {
+            target: kyberStepCbbtc.routerAddress,
+            value: kyberStepCbbtc.value,
+            data: kyberStepCbbtc.data,
+            tokens: [
+                {
+                    token: USDC_ADDRESS,
+                    index: -1
+                },
+            ]
+        },
+        {
+            target: AERODROME_ROUTER,
+            value: 0n,
+            data: aerodromeAddLiquidityCalldata,
+            tokens: [
+                {
+                    token: WETH_ADDRESS,
+                    index: AERODROME_AMOUNT_A_OFFSET
+                },
+                {
+                    token: CBBTC_ADDRESS,
+                    index: AERODROME_AMOUNT_B_OFFSET
+                }
+            ]
+        }
+    ];
+
+    return { order, route, inputToken: USDC_ADDRESS, inputAmount: order.inputs[0].amount };
+}
+
 /**
  * Builds a Metalos vault deposit call (direct deposit, no zap router)
  * Returns the encoded function data for deposit(uint256 amount)
@@ -1423,23 +1536,23 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
 
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600 * 2);
 
-        // For deposit mode, build Metalos deposit (first call) and 3 Beefy deposits (calls 2-4)
+        // For deposit mode, build Metalos deposit (first call) and 4 Beefy deposits (calls 2-5)
         if (mode === 'deposit') {
             // Metalos vault deposit (direct, no zap router)
             const metalosDeposit = buildMetalosDeposit(AMOUNT);
 
-            // Calls 2-4: Beefy zap router deposits
+            // Calls 2-5: Beefy zap router deposits
             const buildResult2 = await buildModerateDepositZap(connectedAddress, deadline);
             const buildResult3 = await buildRiskyDepositZap(connectedAddress, deadline);
-            // const buildResult4 = await buildMeaningfullyRiskyDepositZap(connectedAddress, deadline);
+            const buildResult4 = await buildWETHCBBTCDepositZap(connectedAddress, deadline);
 
             const { order: order2, route: route2, inputToken: beefyInputToken, inputAmount: beefyInputAmount } = buildResult2;
             const { order: order3, route: route3 } = buildResult3;
-            // const { order: order4, route: route4 } = buildResult4;
+            const { order: order4, route: route4 } = buildResult4;
 
-            // Total amount needed: 1x for Metalos + 3x for Beefy
+            // Total amount needed: 1x for Metalos + 4x for Beefy
             const metalosAmount = metalosDeposit.inputAmount;
-            const totalBeefyAmount = beefyInputAmount * 3n;
+            const totalBeefyAmount = beefyInputAmount * 4n;
             const totalInputAmount = metalosAmount + totalBeefyAmount;
 
             showStatus('Checking token approvals...', 'info');
@@ -1467,7 +1580,7 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
                 if (balance < totalInputAmount) {
                     showStatus(
                         `❌ Insufficient balance for token ${inputToken}.\n` +
-                        `Need ${totalInputAmount.toString()} (1x Metalos + 3x Beefy) but only have ${balance.toString()}`,
+                        `Need ${totalInputAmount.toString()} (1x Metalos + 4x Beefy) but only have ${balance.toString()}`,
                         'error'
                     );
                     toggleButtons(false);
@@ -1567,7 +1680,7 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
 
             if (beefyAllowance < totalBeefyAmount) {
                 showStatus(
-                    `Requesting approval for ${totalBeefyAmount.toString()} units of ${beefyInputToken} to Beefy (for 3 deposits)...
+                    `Requesting approval for ${totalBeefyAmount.toString()} units of ${beefyInputToken} to Beefy (for 4 deposits)...
 ` +
                     `Current allowance: ${beefyAllowance.toString()}`,
                     'info'
@@ -1607,10 +1720,10 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
                     return;
                 }
             } else {
-                console.log(`Token ${beefyInputToken} has sufficient allowance for 3 Beefy deposits`);
+                console.log(`Token ${beefyInputToken} has sufficient allowance for 4 Beefy deposits`);
             }
 
-            // Encode calls: Metalos deposit (call 1) + 3 Beefy executeOrder calls (calls 2-4)
+            // Encode calls: Metalos deposit (call 1) + 4 Beefy executeOrder calls (calls 2-5)
             const callData1 = metalosDeposit.data; // Metalos deposit call
 
             const callData2 = encodeFunctionData({
@@ -1625,19 +1738,19 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
                 args: [order3, route3]
             });
 
-            // const callData4 = encodeFunctionData({
-            //     abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
-            //     functionName: 'executeOrder',
-            //     args: [order4, route4]
-            // });
+            const callData4 = encodeFunctionData({
+                abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+                functionName: 'executeOrder',
+                args: [order4, route4]
+            });
 
             console.log('Encoded function selectors:', {
                 call1: callData1.slice(0, 10) + ' (Metalos deposit)',
                 call2: callData2.slice(0, 10) + ' (Beefy executeOrder)',
                 call3: callData3.slice(0, 10) + ' (Beefy executeOrder)',
-                // call4: callData4.slice(0, 10) + ' (Beefy executeOrder)'
+                call4: callData4.slice(0, 10) + ' (Beefy executeOrder - WETH/cbBTC)'
             });
-            console.log('Batching 1 Metalos deposit + 3 Beefy deposits atomically using EIP-5792');
+            console.log('Batching 1 Metalos deposit + 4 Beefy deposits atomically using EIP-5792');
 
             showStatus('Checking EIP-5792 capabilities...', 'info');
 
@@ -1691,7 +1804,7 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
             // Prepare EIP-5792 sendCalls parameters
             const nativeInput2 = order2.inputs.find(input => input.token === ZERO_ADDRESS);
             const nativeInput3 = order3.inputs.find(input => input.token === ZERO_ADDRESS);
-            // const nativeInput4 = order4.inputs.find(input => input.token === ZERO_ADDRESS);
+            const nativeInput4 = order4.inputs.find(input => input.token === ZERO_ADDRESS);
 
             const calls = [
                 // safe
@@ -1712,12 +1825,12 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
                     data: callData3,
                     value: nativeInput3?.amount || 0n,
                 },
-                // // meaningfully risky
-                // {
-                //     to: BEEFY_ZAP_ROUTER as `0x${string}`,
-                //     data: callData4,
-                //     value: nativeInput4?.amount || 0n,
-                // },
+                // WETH/cbBTC
+                {
+                    to: BEEFY_ZAP_ROUTER as `0x${string}`,
+                    data: callData4,
+                    value: nativeInput4?.amount || 0n,
+                },
             ];
 
             const sendCallsParams = {
@@ -1727,7 +1840,7 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
 
             console.debug('EIP-5792 sendCalls', { calls });
 
-            showStatus('Submitting batched transaction (1 Metalos + 3 Beefy deposits) via EIP-5792...', 'info');
+            showStatus('Submitting batched transaction (1 Metalos + 4 Beefy deposits) via EIP-5792...', 'info');
 
             try {
                 const result = await walletClient.sendCalls(sendCallsParams);
@@ -1831,7 +1944,7 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
                     `✅ Batched transaction confirmed! Hash: ${batchReceipt.transactionHash}\n\n` +
                     `Block: ${batchReceipt.blockNumber}\n` +
                     `Gas used: ${batchReceipt.gasUsed.toString()}\n` +
-                    `Executed 1 Metalos deposit + 3 Beefy deposits atomically via EIP-5792`,
+                    `Executed 1 Metalos deposit + 4 Beefy deposits atomically via EIP-5792`,
                     'success'
                 );
             } catch (sendCallsError: any) {
