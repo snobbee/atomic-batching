@@ -12,8 +12,7 @@ const AERO_WSTETH: Address = '0x82a0c1a0d4EF0c0cA3cFDA3AD1AA78309Cc6139b';
 const AERO_ADDRESS: Address = '0x940181a94A35A4569E4529A3CDfB74e38FD98631';
 const WSTETH_ADDRESS: Address = '0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452';
 const WETH_ADDRESS: Address = '0x4200000000000000000000000000000000000006';
-const CBBTC_ADDRESS: Address = '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf';
-const WETH_CBBTC_LP_ADDRESS: Address = '0x22aee3699b6a0fed71490c103bd4e5f3309891d5';
+const WETH_AERO_LP_ADDRESS: Address = '0x7f670f78b17dec44d5ef68a48740b6f8849cc2e6';
 const ZERO_ADDRESS: Address = '0x0000000000000000000000000000000000000000';
 const AERODROME_ROUTER: Address = '0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43';
 const METALOS_VAULT_ADDRESS: Address = '0xf3c4db91f380963e00caa4ac1f0508259c9a3d3a'; // TODO: Update with actual Metalos vault address
@@ -1208,7 +1207,7 @@ async function buildModerateDepositZap(connectedAddress: Address, deadline: bigi
     return { order, route, inputToken: USDC_ADDRESS, inputAmount: order.inputs[0].amount };
 }
 
-async function buildWETHCBBTCDepositZap(connectedAddress: Address, deadline: bigint): Promise<ZapBuildResult> {
+async function buildWETHAERODepositZap(connectedAddress: Address, deadline: bigint): Promise<ZapBuildResult> {
     const order = {
         inputs: [
             {
@@ -1218,7 +1217,7 @@ async function buildWETHCBBTCDepositZap(connectedAddress: Address, deadline: big
         ],
         outputs: [
             {
-                token: WETH_CBBTC_LP_ADDRESS,
+                token: WETH_AERO_LP_ADDRESS,
                 minOutputAmount: 0n
             },
             {
@@ -1230,7 +1229,7 @@ async function buildWETHCBBTCDepositZap(connectedAddress: Address, deadline: big
                 minOutputAmount: 0n
             },
             {
-                token: CBBTC_ADDRESS,
+                token: AERO_ADDRESS,
                 minOutputAmount: 0n
             }
         ],
@@ -1258,10 +1257,10 @@ async function buildWETHCBBTCDepositZap(connectedAddress: Address, deadline: big
         clientId: KYBER_CLIENT_ID,
     });
 
-    // Swap 2: Other half of USDC for cbBTC
-    const kyberStepCbbtc = await kyberEncodeSwap({
+    // Swap 2: Other half of USDC for AERO
+    const kyberStepAero = await kyberEncodeSwap({
         tokenIn: USDC_ADDRESS,
-        tokenOut: CBBTC_ADDRESS,
+        tokenOut: AERO_ADDRESS,
         amountIn: swapAmount,
         zapRouter: BEEFY_ZAP_ROUTER,
         slippageBps: 50,
@@ -1269,12 +1268,12 @@ async function buildWETHCBBTCDepositZap(connectedAddress: Address, deadline: big
         clientId: KYBER_CLIENT_ID,
     });
 
-    // Add liquidity to WETH/cbBTC pool
+    // Add liquidity to WETH/AERO pool
     const {
         amountAOffset: AERODROME_AMOUNT_A_OFFSET,
         amountBOffset: AERODROME_AMOUNT_B_OFFSET,
         data: aerodromeAddLiquidityCalldata,
-    } = locateAerodromeOffsets(WETH_ADDRESS, CBBTC_ADDRESS, false, BEEFY_ZAP_ROUTER, deadline);
+    } = locateAerodromeOffsets(WETH_ADDRESS, AERO_ADDRESS, false, BEEFY_ZAP_ROUTER, deadline);
 
     const route = [
         {
@@ -1289,9 +1288,9 @@ async function buildWETHCBBTCDepositZap(connectedAddress: Address, deadline: big
             ]
         },
         {
-            target: kyberStepCbbtc.routerAddress,
-            value: kyberStepCbbtc.value,
-            data: kyberStepCbbtc.data,
+            target: kyberStepAero.routerAddress,
+            value: kyberStepAero.value,
+            data: kyberStepAero.data,
             tokens: [
                 {
                     token: USDC_ADDRESS,
@@ -1309,7 +1308,7 @@ async function buildWETHCBBTCDepositZap(connectedAddress: Address, deadline: big
                     index: AERODROME_AMOUNT_A_OFFSET
                 },
                 {
-                    token: CBBTC_ADDRESS,
+                    token: AERO_ADDRESS,
                     index: AERODROME_AMOUNT_B_OFFSET
                 }
             ]
@@ -1544,7 +1543,7 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
             // Calls 2-5: Beefy zap router deposits
             const buildResult2 = await buildModerateDepositZap(connectedAddress, deadline);
             const buildResult3 = await buildRiskyDepositZap(connectedAddress, deadline);
-            const buildResult4 = await buildWETHCBBTCDepositZap(connectedAddress, deadline);
+            const buildResult4 = await buildWETHAERODepositZap(connectedAddress, deadline);
 
             const { order: order2, route: route2, inputToken: beefyInputToken, inputAmount: beefyInputAmount } = buildResult2;
             const { order: order3, route: route3 } = buildResult3;
