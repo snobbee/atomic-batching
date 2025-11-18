@@ -1537,21 +1537,28 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
 
         // For deposit mode, build Metalos deposit (first call) and 4 Beefy deposits (calls 2-5)
         if (mode === 'deposit') {
+            // Toggle variables to enable/disable each call in the batch
+            const ENABLE_METALOS_DEPOSIT = false;
+            const ENABLE_MODERATE_DEPOSIT = false;
+            const ENABLE_RISKY_DEPOSIT = false;
+            const ENABLE_WETH_AERO_DEPOSIT = true;
+
             // Metalos vault deposit (direct, no zap router)
-            const metalosDeposit = buildMetalosDeposit(AMOUNT);
+            const metalosDeposit = ENABLE_METALOS_DEPOSIT ? buildMetalosDeposit(AMOUNT) : null;
 
             // Calls 2-5: Beefy zap router deposits
-            const buildResult2 = await buildModerateDepositZap(connectedAddress, deadline);
-            const buildResult3 = await buildRiskyDepositZap(connectedAddress, deadline);
-            const buildResult4 = await buildWETHAERODepositZap(connectedAddress, deadline);
+            const buildResult2 = ENABLE_MODERATE_DEPOSIT ? await buildModerateDepositZap(connectedAddress, deadline) : null;
+            const buildResult3 = ENABLE_RISKY_DEPOSIT ? await buildRiskyDepositZap(connectedAddress, deadline) : null;
+            const buildResult4 = ENABLE_WETH_AERO_DEPOSIT ? await buildWETHAERODepositZap(connectedAddress, deadline) : null;
 
-            const { order: order2, route: route2, inputToken: beefyInputToken, inputAmount: beefyInputAmount } = buildResult2;
-            const { order: order3, route: route3 } = buildResult3;
-            const { order: order4, route: route4 } = buildResult4;
+            const { order: order2, route: route2, inputToken: beefyInputToken, inputAmount: beefyInputAmount } = buildResult2 || {};
+            const { order: order3, route: route3 } = buildResult3 || {};
+            const { order: order4, route: route4 } = buildResult4 || {};
 
-            // Total amount needed: 1x for Metalos + 4x for Beefy
-            const metalosAmount = metalosDeposit.inputAmount;
-            const totalBeefyAmount = beefyInputAmount * 4n;
+            // Total amount needed: calculate based on enabled deposits
+            const metalosAmount = ENABLE_METALOS_DEPOSIT ? metalosDeposit!.inputAmount : 0n;
+            const enabledBeefyCount = [ENABLE_MODERATE_DEPOSIT, ENABLE_RISKY_DEPOSIT, ENABLE_WETH_AERO_DEPOSIT].filter(Boolean).length;
+            const totalBeefyAmount = ENABLE_MODERATE_DEPOSIT && beefyInputAmount ? beefyInputAmount * BigInt(enabledBeefyCount) : 0n;
             const totalInputAmount = metalosAmount + totalBeefyAmount;
 
             showStatus('Checking token approvals...', 'info');
@@ -1577,9 +1584,13 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
                     args: [connectedAddress]
                 });
                 if (balance < totalInputAmount) {
+                    const balanceBreakdown = [
+                        ENABLE_METALOS_DEPOSIT ? '1x Metalos' : null,
+                        enabledBeefyCount > 0 ? `${enabledBeefyCount}x Beefy` : null
+                    ].filter(Boolean).join(' + ');
                     showStatus(
                         `❌ Insufficient balance for token ${inputToken}.\n` +
-                        `Need ${totalInputAmount.toString()} (1x Metalos + 4x Beefy) but only have ${balance.toString()}`,
+                        `Need ${totalInputAmount.toString()} (${balanceBreakdown}) but only have ${balance.toString()}`,
                         'error'
                     );
                     toggleButtons(false);
@@ -1591,165 +1602,171 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
             }
 
             // Check and handle Metalos vault approval (direct deposit, no asset() call)
-            let metalosAllowance: bigint;
-            try {
-                metalosAllowance = await publicClient.readContract({
-                    address: USDC_ADDRESS,
-                    abi: USDC_ABI,
-                    functionName: 'allowance',
-                    args: [connectedAddress, METALOS_VAULT_ADDRESS]
-                });
-                console.log(`USDC allowance to Metalos vault:`, metalosAllowance.toString());
-            } catch (error: any) {
-                console.error('Error reading Metalos allowance:', error);
-                metalosAllowance = 0n;
-            }
-
-            if (metalosAllowance < metalosAmount) {
-                showStatus(
-                    `Requesting approval for ${metalosAmount.toString()} units of USDC to Metalos vault...
-` +
-                    `Current allowance: ${metalosAllowance.toString()}`,
-                    'info'
-                );
-
+            if (ENABLE_METALOS_DEPOSIT) {
+                let metalosAllowance: bigint;
                 try {
-                    const approveHash = await walletClient.writeContract({
+                    metalosAllowance = await publicClient.readContract({
                         address: USDC_ADDRESS,
                         abi: USDC_ABI,
-                        functionName: 'approve',
-                        args: [METALOS_VAULT_ADDRESS, metalosAmount]
+                        functionName: 'allowance',
+                        args: [connectedAddress, METALOS_VAULT_ADDRESS]
                     });
+                    console.log(`USDC allowance to Metalos vault:`, metalosAllowance.toString());
+                } catch (error: any) {
+                    console.error('Error reading Metalos allowance:', error);
+                    metalosAllowance = 0n;
+                }
 
+                if (metalosAllowance < metalosAmount) {
                     showStatus(
-                        `Metalos approval transaction submitted: ${approveHash}
+                        `Requesting approval for ${metalosAmount.toString()} units of USDC to Metalos vault...
 ` +
-                        `Waiting for confirmation...`,
+                        `Current allowance: ${metalosAllowance.toString()}`,
                         'info'
                     );
 
-                    await publicClient.waitForTransactionReceipt({
-                        hash: approveHash
-                    });
+                    try {
+                        const approveHash = await walletClient.writeContract({
+                            address: USDC_ADDRESS,
+                            abi: USDC_ABI,
+                            functionName: 'approve',
+                            args: [METALOS_VAULT_ADDRESS, metalosAmount]
+                        });
 
-                    showStatus(
-                        `✅ Metalos approval confirmed!`,
-                        'success'
-                    );
-                } catch (approveError: any) {
-                    console.error('Metalos approval error:', approveError);
-                    showStatus(
-                        `❌ Metalos approval failed: ${approveError.message || 'Unknown error'}\n` +
-                        `Please approve tokens manually and try again.`,
-                        'error'
-                    );
-                    toggleButtons(false);
-                    return;
+                        showStatus(
+                            `Metalos approval transaction submitted: ${approveHash}
+` +
+                            `Waiting for confirmation...`,
+                            'info'
+                        );
+
+                        await publicClient.waitForTransactionReceipt({
+                            hash: approveHash
+                        });
+
+                        showStatus(
+                            `✅ Metalos approval confirmed!`,
+                            'success'
+                        );
+                    } catch (approveError: any) {
+                        console.error('Metalos approval error:', approveError);
+                        showStatus(
+                            `❌ Metalos approval failed: ${approveError.message || 'Unknown error'}\n` +
+                            `Please approve tokens manually and try again.`,
+                            'error'
+                        );
+                        toggleButtons(false);
+                        return;
+                    }
+                } else {
+                    console.log(`USDC has sufficient allowance for Metalos deposit`);
                 }
-            } else {
-                console.log(`USDC has sufficient allowance for Metalos deposit`);
             }
 
             // Check and handle Beefy token manager approval
-            const tokenManagerAddress = await publicClient.readContract({
-                address: BEEFY_ZAP_ROUTER,
-                abi: BEEFY_ROUTER_MINI_ABI,
-                functionName: 'tokenManager'
-            }) as Address;
-            console.log('Beefy token manager:', tokenManagerAddress);
+            const hasAnyBeefyDeposit = ENABLE_MODERATE_DEPOSIT || ENABLE_RISKY_DEPOSIT || ENABLE_WETH_AERO_DEPOSIT;
+            if (hasAnyBeefyDeposit && beefyInputToken) {
+                const tokenManagerAddress = await publicClient.readContract({
+                    address: BEEFY_ZAP_ROUTER,
+                    abi: BEEFY_ROUTER_MINI_ABI,
+                    functionName: 'tokenManager'
+                }) as Address;
+                console.log('Beefy token manager:', tokenManagerAddress);
 
-            let beefyAllowance: bigint;
-            try {
-                beefyAllowance = await publicClient.readContract({
-                    address: beefyInputToken,
-                    abi: USDC_ABI,
-                    functionName: 'allowance',
-                    args: [connectedAddress, tokenManagerAddress]
-                });
-                console.log(`Token ${beefyInputToken} allowance to Beefy Token Manager:`, beefyAllowance.toString());
-            } catch (error: any) {
-                console.error('Error reading Beefy allowance:', error);
-                showStatus(
-                    `⚠️ Could not read allowance for ${beefyInputToken}. Assuming 0 and requesting approval...\n` +
-                    `Error: ${error.message || 'Unknown error'}`,
-                    'info'
-                );
-                beefyAllowance = 0n;
-            }
-
-            if (beefyAllowance < totalBeefyAmount) {
-                showStatus(
-                    `Requesting approval for ${totalBeefyAmount.toString()} units of ${beefyInputToken} to Beefy (for 4 deposits)...
-` +
-                    `Current allowance: ${beefyAllowance.toString()}`,
-                    'info'
-                );
-
+                let beefyAllowance: bigint;
                 try {
-                    const approveHash = await walletClient.writeContract({
+                    beefyAllowance = await publicClient.readContract({
                         address: beefyInputToken,
                         abi: USDC_ABI,
-                        functionName: 'approve',
-                        args: [tokenManagerAddress, totalBeefyAmount]
+                        functionName: 'allowance',
+                        args: [connectedAddress, tokenManagerAddress]
                     });
-
+                    console.log(`Token ${beefyInputToken} allowance to Beefy Token Manager:`, beefyAllowance.toString());
+                } catch (error: any) {
+                    console.error('Error reading Beefy allowance:', error);
                     showStatus(
-                        `Beefy approval transaction submitted: ${approveHash}
+                        `⚠️ Could not read allowance for ${beefyInputToken}. Assuming 0 and requesting approval...\n` +
+                        `Error: ${error.message || 'Unknown error'}`,
+                        'info'
+                    );
+                    beefyAllowance = 0n;
+                }
+
+                if (beefyAllowance < totalBeefyAmount) {
+                    showStatus(
+                        `Requesting approval for ${totalBeefyAmount.toString()} units of ${beefyInputToken} to Beefy (for ${enabledBeefyCount} deposits)...
 ` +
-                        `Waiting for confirmation...`,
+                        `Current allowance: ${beefyAllowance.toString()}`,
                         'info'
                     );
 
-                    await publicClient.waitForTransactionReceipt({
-                        hash: approveHash
-                    });
+                    try {
+                        const approveHash = await walletClient.writeContract({
+                            address: beefyInputToken,
+                            abi: USDC_ABI,
+                            functionName: 'approve',
+                            args: [tokenManagerAddress, totalBeefyAmount]
+                        });
 
-                    showStatus(
-                        `✅ Beefy approval confirmed! Proceeding with batched order execution...`,
-                        'success'
-                    );
-                } catch (approveError: any) {
-                    console.error('Beefy approval error:', approveError);
-                    showStatus(
-                        `❌ Beefy approval failed: ${approveError.message || 'Unknown error'}\n` +
-                        `Please approve tokens manually and try again.`,
-                        'error'
-                    );
-                    toggleButtons(false);
-                    return;
+                        showStatus(
+                            `Beefy approval transaction submitted: ${approveHash}
+` +
+                            `Waiting for confirmation...`,
+                            'info'
+                        );
+
+                        await publicClient.waitForTransactionReceipt({
+                            hash: approveHash
+                        });
+
+                        showStatus(
+                            `✅ Beefy approval confirmed! Proceeding with batched order execution...`,
+                            'success'
+                        );
+                    } catch (approveError: any) {
+                        console.error('Beefy approval error:', approveError);
+                        showStatus(
+                            `❌ Beefy approval failed: ${approveError.message || 'Unknown error'}\n` +
+                            `Please approve tokens manually and try again.`,
+                            'error'
+                        );
+                        toggleButtons(false);
+                        return;
+                    }
+                } else {
+                    console.log(`Token ${beefyInputToken} has sufficient allowance for ${enabledBeefyCount} Beefy deposits`);
                 }
-            } else {
-                console.log(`Token ${beefyInputToken} has sufficient allowance for 4 Beefy deposits`);
             }
 
-            // Encode calls: Metalos deposit (call 1) + 4 Beefy executeOrder calls (calls 2-5)
-            const callData1 = metalosDeposit.data; // Metalos deposit call
+            // Encode calls: Metalos deposit (call 1) + Beefy executeOrder calls (calls 2-4)
+            const callData1 = ENABLE_METALOS_DEPOSIT ? metalosDeposit!.data : null; // Metalos deposit call
 
-            const callData2 = encodeFunctionData({
+            const callData2 = ENABLE_MODERATE_DEPOSIT && order2 && route2 ? encodeFunctionData({
                 abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
                 functionName: 'executeOrder',
                 args: [order2, route2]
-            });
+            }) : null;
 
-            const callData3 = encodeFunctionData({
+            const callData3 = ENABLE_RISKY_DEPOSIT && order3 && route3 ? encodeFunctionData({
                 abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
                 functionName: 'executeOrder',
                 args: [order3, route3]
-            });
+            }) : null;
 
-            const callData4 = encodeFunctionData({
+            const callData4 = ENABLE_WETH_AERO_DEPOSIT && order4 && route4 ? encodeFunctionData({
                 abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
                 functionName: 'executeOrder',
                 args: [order4, route4]
-            });
+            }) : null;
 
             console.log('Encoded function selectors:', {
-                call1: callData1.slice(0, 10) + ' (Metalos deposit)',
-                call2: callData2.slice(0, 10) + ' (Beefy executeOrder)',
-                call3: callData3.slice(0, 10) + ' (Beefy executeOrder)',
-                call4: callData4.slice(0, 10) + ' (Beefy executeOrder - WETH/cbBTC)'
+                call1: callData1 ? callData1.slice(0, 10) + ' (Metalos deposit)' : 'disabled',
+                call2: callData2 ? callData2.slice(0, 10) + ' (Beefy executeOrder)' : 'disabled',
+                call3: callData3 ? callData3.slice(0, 10) + ' (Beefy executeOrder)' : 'disabled',
+                call4: callData4 ? callData4.slice(0, 10) + ' (Beefy executeOrder - WETH/cbBTC)' : 'disabled'
             });
-            console.log('Batching 1 Metalos deposit + 4 Beefy deposits atomically using EIP-5792');
+            const enabledCount = [ENABLE_METALOS_DEPOSIT, ENABLE_MODERATE_DEPOSIT, ENABLE_RISKY_DEPOSIT, ENABLE_WETH_AERO_DEPOSIT].filter(Boolean).length;
+            console.log(`Batching ${enabledCount} deposits atomically using EIP-5792`);
 
             showStatus('Checking EIP-5792 capabilities...', 'info');
 
@@ -1801,35 +1818,35 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
             showStatus('Preparing batched transaction with EIP-5792...', 'info');
 
             // Prepare EIP-5792 sendCalls parameters
-            const nativeInput2 = order2.inputs.find(input => input.token === ZERO_ADDRESS);
-            const nativeInput3 = order3.inputs.find(input => input.token === ZERO_ADDRESS);
-            const nativeInput4 = order4.inputs.find(input => input.token === ZERO_ADDRESS);
+            const nativeInput2 = ENABLE_MODERATE_DEPOSIT && order2 ? order2.inputs.find(input => input.token === ZERO_ADDRESS) : null;
+            const nativeInput3 = ENABLE_RISKY_DEPOSIT && order3 ? order3.inputs.find(input => input.token === ZERO_ADDRESS) : null;
+            const nativeInput4 = ENABLE_WETH_AERO_DEPOSIT && order4 ? order4.inputs.find(input => input.token === ZERO_ADDRESS) : null;
 
             const calls = [
-                // safe
-                {
+                // Metalos deposit
+                ...(ENABLE_METALOS_DEPOSIT && callData1 && metalosDeposit ? [{
                     to: metalosDeposit.to as `0x${string}`,
                     data: callData1,
                     value: metalosDeposit.value,
-                },
-                // moderate
-                {
+                }] : []),
+                // Moderate deposit
+                ...(ENABLE_MODERATE_DEPOSIT && callData2 ? [{
                     to: BEEFY_ZAP_ROUTER as `0x${string}`,
                     data: callData2,
                     value: nativeInput2?.amount || 0n,
-                },
-                // risky
-                {
+                }] : []),
+                // Risky deposit
+                ...(ENABLE_RISKY_DEPOSIT && callData3 ? [{
                     to: BEEFY_ZAP_ROUTER as `0x${string}`,
                     data: callData3,
                     value: nativeInput3?.amount || 0n,
-                },
-                // WETH/cbBTC
-                {
+                }] : []),
+                // WETH/cbBTC deposit
+                ...(ENABLE_WETH_AERO_DEPOSIT && callData4 ? [{
                     to: BEEFY_ZAP_ROUTER as `0x${string}`,
                     data: callData4,
                     value: nativeInput4?.amount || 0n,
-                },
+                }] : []),
             ];
 
             const sendCallsParams = {
@@ -1839,7 +1856,11 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
 
             console.debug('EIP-5792 sendCalls', { calls });
 
-            showStatus('Submitting batched transaction (1 Metalos + 4 Beefy deposits) via EIP-5792...', 'info');
+            const depositSummary = [
+                ENABLE_METALOS_DEPOSIT ? '1 Metalos' : null,
+                enabledBeefyCount > 0 ? `${enabledBeefyCount} Beefy` : null
+            ].filter(Boolean).join(' + ');
+            showStatus(`Submitting batched transaction (${depositSummary} deposits) via EIP-5792...`, 'info');
 
             try {
                 const result = await walletClient.sendCalls(sendCallsParams);
