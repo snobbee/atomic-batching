@@ -1,21 +1,40 @@
 import { createWalletClient, createPublicClient, custom, parseAbi, type Address, encodeFunctionData, parseUnits, getContract } from 'viem';
-import { baseSepolia, base } from 'viem/chains'
+import { baseSepolia, base, mainnet, sepolia } from 'viem/chains'
 
 const MAINNET = true;
 
-const USDC_ADDRESS: Address = MAINNET ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
-const MODERATE_VAULT_ADDRESS: Address = '0x09139a80454609b69700836a9ee12db4b5dbb15f';
-const RISKY_VAULT_ADDRESS: Address = '0x06a613d3a056d4b04d7523c11d82c67bebf9d850';
-// const MEANINGFULLY_RISKY_VAULT_ADDRESS: Address = '0x0000000000000000000000000000000000000000';
-const WETH_USDC_ADDRESS: Address = '0xcdac0d6c6c59727a65f871236188350531885c43';
-const AERO_WSTETH: Address = '0x82a0c1a0d4EF0c0cA3cFDA3AD1AA78309Cc6139b';
-const AERO_ADDRESS: Address = '0x940181a94A35A4569E4529A3CDfB74e38FD98631';
-const WSTETH_ADDRESS: Address = '0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452';
-const WETH_ADDRESS: Address = '0x4200000000000000000000000000000000000006';
-const WETH_AERO_LP_ADDRESS: Address = '0x7f670f78b17dec44d5ef68a48740b6f8849cc2e6';
+// Network-specific USDC addresses
+const USDC_ADDRESS_BASE: Address = MAINNET ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' : '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
+// USDC on Ethereum (for minting destination - kept for reference/verification)
+// @ts-expect-error - Intentionally unused, kept for reference to verify minted USDC address
+const USDC_ADDRESS_ETHEREUM: Address = MAINNET ? '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' : '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238';
+const USDC_ADDRESS: Address = USDC_ADDRESS_BASE; // Default to Base for backward compatibility
+
+// CCTP Contract Addresses
+// Source: https://developers.circle.com/cctp/evm-smart-contracts
+// Base Mainnet (Domain 6)
+const CCTP_TOKEN_MESSENGER_BASE: Address = MAINNET ? '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d' : '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'; // TokenMessengerV2
+// MessageTransmitter on Base (kept for reference, not used in current implementation)
+// @ts-expect-error - Intentionally unused, kept for reference
+const CCTP_MESSAGE_TRANSMITTER_BASE: Address = MAINNET ? '0x81D40F21F12A8F0E3252Bccb954D722d4c464B64' : '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'; // MessageTransmitterV2
+// Ethereum Mainnet (Domain 0) - for minting on Ethereum
+const CCTP_MESSAGE_TRANSMITTER_ETHEREUM: Address = MAINNET ? '0x81D40F21F12A8F0E3252Bccb954D722d4c464B64' : '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'; // MessageTransmitterV2
+
+// CCTP Domain IDs (chain identifiers)
+const CCTP_DOMAIN_BASE = MAINNET ? 6 : 6;
+const CCTP_DOMAIN_ETHEREUM = MAINNET ? 0 : 0; // Ethereum mainnet domain ID
+const MODERATE_VAULT_ADDRESS_BASE: Address = '0x09139a80454609b69700836a9ee12db4b5dbb15f';
+const RISKY_VAULT_ADDRESS_BASE: Address = '0x06a613d3a056d4b04d7523c11d82c67bebf9d850';
+// const MEANINGFULLY_RISKY_VAULT_ADDRESS_BASE: Address = '0x0000000000000000000000000000000000000000';
+const WETH_USDC_ADDRESS_BASE: Address = '0xcdac0d6c6c59727a65f871236188350531885c43';
+const AERO_WSTETH_BASE: Address = '0x82a0c1a0d4EF0c0cA3cFDA3AD1AA78309Cc6139b';
+const AERO_ADDRESS_BASE: Address = '0x940181a94A35A4569E4529A3CDfB74e38FD98631';
+const WSTETH_ADDRESS_BASE: Address = '0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452';
+const WETH_ADDRESS_BASE: Address = '0x4200000000000000000000000000000000000006';
+const WETH_AERO_LP_ADDRESS_BASE: Address = '0x7f670f78b17dec44d5ef68a48740b6f8849cc2e6';
 const ZERO_ADDRESS: Address = '0x0000000000000000000000000000000000000000';
-const AERODROME_ROUTER: Address = '0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43';
-const METALOS_VAULT_ADDRESS: Address = '0xf3c4db91f380963e00caa4ac1f0508259c9a3d3a'; // TODO: Update with actual Metalos vault address
+const AERODROME_ROUTER_BASE: Address = '0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43';
+const METALOS_VAULT_ADDRESS_BASE: Address = '0xf3c4db91f380963e00caa4ac1f0508259c9a3d3a'; // TODO: Update with actual Metalos vault address
 
 const USDC_DECIMALS = 6;
 const AMOUNT = parseUnits('0.1', USDC_DECIMALS);
@@ -26,6 +45,19 @@ const USDC_ABI = parseAbi([
     'function transfer(address recipient, uint256 amount) external returns (bool)',
     'function allowance(address owner, address spender) view returns (uint256)',
     'function balanceOf(address account) view returns (uint256)',
+]);
+
+// CCTP TokenMessenger ABI
+// Source: https://developers.circle.com/cctp/transfer-usdc-on-testnet-from-ethereum-to-avalanche
+const CCTP_TOKEN_MESSENGER_ABI = parseAbi([
+    'function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold) external returns (uint64 nonce)',
+    'function messageTransmitter() view returns (address)',
+]);
+
+// CCTP MessageTransmitter ABI (for minting on Ethereum)
+// Source: https://developers.circle.com/cctp/transfer-usdc-on-testnet-from-ethereum-to-avalanche#4-mint-usdc
+const CCTP_MESSAGE_TRANSMITTER_ABI = parseAbi([
+    'function receiveMessage(bytes message, bytes attestation) external',
 ]);
 
 // Full ABI for Beefy Zap Router (kept for reference)
@@ -702,7 +734,7 @@ export const BEEFY_ZAP_ABI = [
     }
 ]
 
-const AERODROME_ROUTER_ABI = parseAbi([
+const AERODROME_ROUTER_BASE_ABI = parseAbi([
     'function addLiquidity(address tokenA, address tokenB, bool stable, uint256 amountADesired, uint256 amountBDesired, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline) returns (uint256 amountA, uint256 amountB, uint256 liquidity)',
     'function removeLiquidity(address tokenA, address tokenB, bool stable, uint256 liquidity, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline) returns (uint256 amountA, uint256 amountB)',
     'function poolFor(address tokenA, address tokenB, bool stable, address factory) view returns (address)',
@@ -948,7 +980,7 @@ function locateAerodromeOffsets(tokenA: Address, tokenB: Address, stable: boolea
     const SENT_A = 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1n;
     const SENT_B = 0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2n;
     const data = encodeFunctionData({
-        abi: AERODROME_ROUTER_ABI,
+        abi: AERODROME_ROUTER_BASE_ABI,
         functionName: 'addLiquidity',
         args: [tokenA, tokenB, stable, SENT_A, SENT_B, 0n, 0n, to, deadline],
     });
@@ -994,11 +1026,11 @@ async function buildRiskyDepositZap(connectedAddress: Address, deadline: bigint)
         ],
         outputs: [
             {
-                token: RISKY_VAULT_ADDRESS,
+                token: RISKY_VAULT_ADDRESS_BASE,
                 minOutputAmount: 0n
             },
             {
-                token: AERO_WSTETH,
+                token: AERO_WSTETH_BASE,
                 minOutputAmount: 0n
             },
             {
@@ -1006,11 +1038,11 @@ async function buildRiskyDepositZap(connectedAddress: Address, deadline: bigint)
                 minOutputAmount: 0n
             },
             {
-                token: AERO_ADDRESS,
+                token: AERO_ADDRESS_BASE,
                 minOutputAmount: 0n
             },
             {
-                token: WSTETH_ADDRESS,
+                token: WSTETH_ADDRESS_BASE,
                 minOutputAmount: 0n
             }
         ],
@@ -1030,7 +1062,7 @@ async function buildRiskyDepositZap(connectedAddress: Address, deadline: bigint)
     // Swap 1: Half of USDC for AERO
     const kyberStepAero = await kyberEncodeSwap({
         tokenIn: USDC_ADDRESS,
-        tokenOut: AERO_ADDRESS,
+        tokenOut: AERO_ADDRESS_BASE,
         amountIn: swapAmount,
         zapRouter: BEEFY_ZAP_ROUTER,
         slippageBps: 50,
@@ -1041,7 +1073,7 @@ async function buildRiskyDepositZap(connectedAddress: Address, deadline: bigint)
     // Swap 2: Other half of USDC for WSTETH
     const kyberStepWsteth = await kyberEncodeSwap({
         tokenIn: USDC_ADDRESS,
-        tokenOut: WSTETH_ADDRESS,
+        tokenOut: WSTETH_ADDRESS_BASE,
         amountIn: swapAmount,
         zapRouter: BEEFY_ZAP_ROUTER,
         slippageBps: 50,
@@ -1054,7 +1086,7 @@ async function buildRiskyDepositZap(connectedAddress: Address, deadline: bigint)
         amountAOffset: AERODROME_AMOUNT_A_OFFSET,
         amountBOffset: AERODROME_AMOUNT_B_OFFSET,
         data: aerodromeAddLiquidityCalldata,
-    } = locateAerodromeOffsets(AERO_ADDRESS, WSTETH_ADDRESS, false, BEEFY_ZAP_ROUTER, deadline);
+    } = locateAerodromeOffsets(AERO_ADDRESS_BASE, WSTETH_ADDRESS_BASE, false, BEEFY_ZAP_ROUTER, deadline);
 
     const route = [
         {
@@ -1080,27 +1112,27 @@ async function buildRiskyDepositZap(connectedAddress: Address, deadline: bigint)
             ]
         },
         {
-            target: AERODROME_ROUTER,
+            target: AERODROME_ROUTER_BASE,
             value: 0n,
             data: aerodromeAddLiquidityCalldata,
             tokens: [
                 {
-                    token: AERO_ADDRESS,
+                    token: AERO_ADDRESS_BASE,
                     index: AERODROME_AMOUNT_A_OFFSET
                 },
                 {
-                    token: WSTETH_ADDRESS,
+                    token: WSTETH_ADDRESS_BASE,
                     index: AERODROME_AMOUNT_B_OFFSET
                 }
             ]
         },
         {
-            target: RISKY_VAULT_ADDRESS,
+            target: RISKY_VAULT_ADDRESS_BASE,
             value: 0n,
             data: "0xde5f6268" as `0x${string}`,
             tokens: [
                 {
-                    token: AERO_WSTETH,
+                    token: AERO_WSTETH_BASE,
                     index: -1
                 }
             ]
@@ -1120,11 +1152,11 @@ async function buildModerateDepositZap(connectedAddress: Address, deadline: bigi
         ],
         outputs: [
             {
-                token: MODERATE_VAULT_ADDRESS,
+                token: MODERATE_VAULT_ADDRESS_BASE,
                 minOutputAmount: 0n
             },
             {
-                token: WETH_USDC_ADDRESS,
+                token: WETH_USDC_ADDRESS_BASE,
                 minOutputAmount: 0n
             },
             {
@@ -1132,7 +1164,7 @@ async function buildModerateDepositZap(connectedAddress: Address, deadline: bigi
                 minOutputAmount: 0n
             },
             {
-                token: WETH_ADDRESS,
+                token: WETH_ADDRESS_BASE,
                 minOutputAmount: 0n
             }
         ],
@@ -1151,7 +1183,7 @@ async function buildModerateDepositZap(connectedAddress: Address, deadline: bigi
 
     const kyberStep = await kyberEncodeSwap({
         tokenIn: USDC_ADDRESS,
-        tokenOut: WETH_ADDRESS,
+        tokenOut: WETH_ADDRESS_BASE,
         amountIn: swapAmount,
         zapRouter: BEEFY_ZAP_ROUTER,
         slippageBps: 50,
@@ -1162,7 +1194,7 @@ async function buildModerateDepositZap(connectedAddress: Address, deadline: bigi
         amountAOffset: AERODROME_AMOUNT_A_OFFSET,
         amountBOffset: AERODROME_AMOUNT_B_OFFSET,
         data: aerodromeAddLiquidityCalldata,
-    } = locateAerodromeOffsets(WETH_ADDRESS, USDC_ADDRESS, false, BEEFY_ZAP_ROUTER, deadline);
+    } = locateAerodromeOffsets(WETH_ADDRESS_BASE, USDC_ADDRESS, false, BEEFY_ZAP_ROUTER, deadline);
 
     const route = [
         {
@@ -1177,12 +1209,12 @@ async function buildModerateDepositZap(connectedAddress: Address, deadline: bigi
             ]
         },
         {
-            target: AERODROME_ROUTER,
+            target: AERODROME_ROUTER_BASE,
             value: 0n,
             data: aerodromeAddLiquidityCalldata,
             tokens: [
                 {
-                    token: WETH_ADDRESS,
+                    token: WETH_ADDRESS_BASE,
                     index: AERODROME_AMOUNT_A_OFFSET
                 },
                 {
@@ -1192,12 +1224,12 @@ async function buildModerateDepositZap(connectedAddress: Address, deadline: bigi
             ]
         },
         {
-            target: MODERATE_VAULT_ADDRESS,
+            target: MODERATE_VAULT_ADDRESS_BASE,
             value: 0n,
             data: "0xde5f6268" as `0x${string}`,
             tokens: [
                 {
-                    token: WETH_USDC_ADDRESS,
+                    token: WETH_USDC_ADDRESS_BASE,
                     index: -1
                 }
             ]
@@ -1217,7 +1249,7 @@ async function buildWETHAERODepositZap(connectedAddress: Address, deadline: bigi
         ],
         outputs: [
             {
-                token: WETH_AERO_LP_ADDRESS,
+                token: WETH_AERO_LP_ADDRESS_BASE,
                 minOutputAmount: 0n
             },
             {
@@ -1225,11 +1257,11 @@ async function buildWETHAERODepositZap(connectedAddress: Address, deadline: bigi
                 minOutputAmount: 0n
             },
             {
-                token: WETH_ADDRESS,
+                token: WETH_ADDRESS_BASE,
                 minOutputAmount: 0n
             },
             {
-                token: AERO_ADDRESS,
+                token: AERO_ADDRESS_BASE,
                 minOutputAmount: 0n
             }
         ],
@@ -1249,7 +1281,7 @@ async function buildWETHAERODepositZap(connectedAddress: Address, deadline: bigi
     // Swap 1: Half of USDC for WETH
     const kyberStepWeth = await kyberEncodeSwap({
         tokenIn: USDC_ADDRESS,
-        tokenOut: WETH_ADDRESS,
+        tokenOut: WETH_ADDRESS_BASE,
         amountIn: swapAmount,
         zapRouter: BEEFY_ZAP_ROUTER,
         slippageBps: 50,
@@ -1260,7 +1292,7 @@ async function buildWETHAERODepositZap(connectedAddress: Address, deadline: bigi
     // Swap 2: Other half of USDC for AERO
     const kyberStepAero = await kyberEncodeSwap({
         tokenIn: USDC_ADDRESS,
-        tokenOut: AERO_ADDRESS,
+        tokenOut: AERO_ADDRESS_BASE,
         amountIn: swapAmount,
         zapRouter: BEEFY_ZAP_ROUTER,
         slippageBps: 50,
@@ -1273,7 +1305,7 @@ async function buildWETHAERODepositZap(connectedAddress: Address, deadline: bigi
         amountAOffset: AERODROME_AMOUNT_A_OFFSET,
         amountBOffset: AERODROME_AMOUNT_B_OFFSET,
         data: aerodromeAddLiquidityCalldata,
-    } = locateAerodromeOffsets(WETH_ADDRESS, AERO_ADDRESS, false, BEEFY_ZAP_ROUTER, deadline);
+    } = locateAerodromeOffsets(WETH_ADDRESS_BASE, AERO_ADDRESS_BASE, false, BEEFY_ZAP_ROUTER, deadline);
 
     const route = [
         {
@@ -1299,16 +1331,16 @@ async function buildWETHAERODepositZap(connectedAddress: Address, deadline: bigi
             ]
         },
         {
-            target: AERODROME_ROUTER,
+            target: AERODROME_ROUTER_BASE,
             value: 0n,
             data: aerodromeAddLiquidityCalldata,
             tokens: [
                 {
-                    token: WETH_ADDRESS,
+                    token: WETH_ADDRESS_BASE,
                     index: AERODROME_AMOUNT_A_OFFSET
                 },
                 {
-                    token: AERO_ADDRESS,
+                    token: AERO_ADDRESS_BASE,
                     index: AERODROME_AMOUNT_B_OFFSET
                 }
             ]
@@ -1336,12 +1368,284 @@ function buildMetalosDeposit(amount: bigint): {
     });
 
     return {
-        to: METALOS_VAULT_ADDRESS,
+        to: METALOS_VAULT_ADDRESS_BASE,
         data: depositData,
         value: 0n,
         inputToken: USDC_ADDRESS,
         inputAmount: amount
     };
+}
+
+/**
+ * Converts an Ethereum address to bytes32 format (padded with zeros on the left)
+ * Used for CCTP mintRecipient parameter
+ */
+function addressToBytes32(address: Address): `0x${string}` {
+    // Remove '0x' prefix, pad to 64 characters (32 bytes), then add '0x' back
+    const addressWithoutPrefix = address.slice(2).toLowerCase();
+    const padded = addressWithoutPrefix.padStart(64, '0');
+    return `0x${padded}` as `0x${string}`;
+}
+
+/**
+ * Builds CCTP bridge calls (approval + depositForBurn) to bridge USDC from Base to Ethereum
+ * Returns two call objects: approval call and depositForBurn call
+ * Note: The minting on Ethereum happens separately after Circle's attestation
+ * Based on: https://developers.circle.com/cctp/transfer-usdc-on-testnet-from-ethereum-to-avalanche
+ */
+function buildCCTPBridge(amount: bigint, recipient: Address, maxFee: bigint = 500n, minFinalityThreshold: number = 1000): {
+    approvalCall: {
+        to: Address;
+        data: `0x${string}`;
+        value: bigint;
+    };
+    bridgeCall: {
+        to: Address;
+        data: `0x${string}`;
+        value: bigint;
+    };
+    inputToken: Address;
+    inputAmount: bigint;
+} {
+    const tokenMessenger = CCTP_TOKEN_MESSENGER_BASE;
+    const destinationDomain = CCTP_DOMAIN_ETHEREUM;
+    const mintRecipient = addressToBytes32(recipient);
+    const burnToken = USDC_ADDRESS_BASE;
+    // destinationCaller: bytes32(0) allows any address to call receiveMessage on destination
+    const destinationCaller = '0x0000000000000000000000000000000000000000000000000000000000000000' as `0x${string}`;
+
+    // Approval call: Approve TokenMessenger to spend USDC
+    const approvalData = encodeFunctionData({
+        abi: USDC_ABI,
+        functionName: 'approve',
+        args: [tokenMessenger, amount]
+    });
+
+    // Bridge call: depositForBurn on TokenMessengerV2
+    // Parameters match the official CCTP V2 documentation
+    const bridgeData = encodeFunctionData({
+        abi: CCTP_TOKEN_MESSENGER_ABI,
+        functionName: 'depositForBurn',
+        args: [
+            amount,                    // uint256: amount to burn
+            destinationDomain,        // uint32: destination domain (Ethereum = 0)
+            mintRecipient,            // bytes32: recipient address on destination chain
+            burnToken,                // address: USDC token address on source chain
+            destinationCaller,        // bytes32: caller allowed to receive message (0 = any)
+            maxFee,                   // uint256: max fee for fast transfer (in burnToken units)
+            minFinalityThreshold      // uint32: 1000 for fast transfer, 2000 for finalized
+        ]
+    });
+
+    return {
+        approvalCall: {
+            to: USDC_ADDRESS_BASE,
+            data: approvalData,
+            value: 0n,
+        },
+        bridgeCall: {
+            to: tokenMessenger,
+            data: bridgeData,
+            value: 0n,
+        },
+        inputToken: USDC_ADDRESS_BASE,
+        inputAmount: amount
+    };
+}
+
+/**
+ * Retrieves the message and attestation from Circle's Iris API
+ * API endpoint: https://iris-api-sandbox.circle.com/v2/messages/{domain}?transactionHash={transactionHash}
+ * Reference: https://developers.circle.com/cctp/transfer-usdc-on-testnet-from-ethereum-to-avalanche#3-retrieve-attestation
+ */
+async function retrieveAttestation(
+    transactionHash: `0x${string}`,
+    sourceDomain: number,
+    maxRetries: number = 60,
+    retryDelay: number = 5000
+): Promise<{ message: `0x${string}`; attestation: `0x${string}` }> {
+    const irisApiBase = MAINNET
+        ? 'https://iris-api.circle.com'
+        : 'https://iris-api-sandbox.circle.com';
+
+    // Ensure transaction hash has 0x prefix for the API call
+    const txHashWithPrefix = transactionHash.startsWith('0x') ? transactionHash : `0x${transactionHash}`;
+    const url = `${irisApiBase}/v2/messages/${sourceDomain}?transactionHash=${txHashWithPrefix}`;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            const response = await fetch(url);
+
+            if (response.status === 404) {
+                // Message not found yet, wait and retry
+                if (attempt < maxRetries - 1) {
+                    console.log('Waiting for attestation...');
+                    await new Promise(resolve => setTimeout(resolve, retryDelay));
+                    continue;
+                } else {
+                    throw new Error('Attestation still not found after maximum retries');
+                }
+            }
+
+            if (!response.ok) {
+                throw new Error(`API returned status ${response.status}: ${response.statusText}`);
+            }
+
+            const data = await response.json();
+
+            if (data?.messages?.[0]?.status === 'complete') {
+                const messageData = data.messages[0];
+                if (messageData.message && messageData.attestation) {
+                    console.log('Attestation retrieved successfully!');
+                    return {
+                        message: messageData.message.startsWith('0x')
+                            ? (messageData.message as `0x${string}`)
+                            : (`0x${messageData.message}` as `0x${string}`),
+                        attestation: messageData.attestation.startsWith('0x')
+                            ? (messageData.attestation as `0x${string}`)
+                            : (`0x${messageData.attestation}` as `0x${string}`),
+                    };
+                } else {
+                    throw new Error('Message or attestation missing from API response');
+                }
+            } else if (data?.messages?.[0]?.status === 'pending') {
+                // Attestation is still pending, wait and retry
+                if (attempt < maxRetries - 1) {
+                    console.log('Waiting for attestation...');
+                    await new Promise(resolve => setTimeout(resolve, retryDelay));
+                    continue;
+                } else {
+                    throw new Error('Attestation still pending after maximum retries');
+                }
+            } else {
+                throw new Error(`Unexpected message status: ${data?.messages?.[0]?.status || 'unknown'}`);
+            }
+        } catch (error: any) {
+            if (attempt === maxRetries - 1) {
+                throw new Error(`Failed to get attestation after ${maxRetries} attempts: ${error.message || 'Unknown error'}`);
+            }
+            console.error('Error fetching attestation:', error.message);
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+        }
+    }
+
+    throw new Error('Failed to get attestation: maximum retries exceeded');
+}
+
+/**
+ * Switches the wallet to Ethereum network
+ */
+async function switchToEthereum(): Promise<void> {
+    const ethereumChainId = MAINNET ? mainnet.id : sepolia.id;
+
+    try {
+        await window.ethereum?.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: `0x${ethereumChainId.toString(16)}` }],
+        });
+    } catch (switchError: any) {
+        // If the chain doesn't exist, try to add it
+        if (switchError.code === 4902) {
+            const chainParams = MAINNET ? {
+                chainId: `0x${mainnet.id.toString(16)}`,
+                chainName: 'Ethereum Mainnet',
+                nativeCurrency: {
+                    name: 'Ether',
+                    symbol: 'ETH',
+                    decimals: 18,
+                },
+                rpcUrls: ['https://eth.llamarpc.com'],
+                blockExplorerUrls: ['https://etherscan.io'],
+            } : {
+                chainId: `0x${sepolia.id.toString(16)}`,
+                chainName: 'Sepolia',
+                nativeCurrency: {
+                    name: 'Ether',
+                    symbol: 'ETH',
+                    decimals: 18,
+                },
+                rpcUrls: ['https://rpc.sepolia.org'],
+                blockExplorerUrls: ['https://sepolia.etherscan.io'],
+            };
+
+            await window.ethereum?.request({
+                method: 'wallet_addEthereumChain',
+                params: [chainParams],
+            });
+        } else {
+            throw switchError;
+        }
+    }
+}
+
+/**
+ * Mints USDC on Ethereum by calling receiveMessage on MessageTransmitterV2
+ * Reference: https://developers.circle.com/cctp/transfer-usdc-on-testnet-from-ethereum-to-avalanche#4-mint-usdc
+ */
+async function mintOnEthereum(
+    message: `0x${string}`,
+    attestation: `0x${string}`,
+    recipient: Address
+): Promise<`0x${string}`> {
+    // Switch to Ethereum network
+    await switchToEthereum();
+
+    // Create Ethereum clients
+    const ethereumPublicClient = createPublicClient({
+        chain: MAINNET ? mainnet : sepolia,
+        transport: custom(window.ethereum!),
+    });
+
+    const ethereumWalletClient = createWalletClient({
+        chain: MAINNET ? mainnet : sepolia,
+        transport: custom(window.ethereum!),
+        account: recipient,
+    });
+
+    // Verify we're on the correct network
+    const chainId = await ethereumPublicClient.getChainId();
+    const expectedChainId = MAINNET ? mainnet.id : sepolia.id;
+    if (chainId !== expectedChainId) {
+        throw new Error(`Wrong network! Expected chain ID ${expectedChainId}, but connected to ${chainId}`);
+    }
+
+    // Call receiveMessage on MessageTransmitterV2
+    // The message and attestation are already in the correct format from the API
+    const hash = await ethereumWalletClient.writeContract({
+        address: CCTP_MESSAGE_TRANSMITTER_ETHEREUM,
+        abi: CCTP_MESSAGE_TRANSMITTER_ABI,
+        functionName: 'receiveMessage',
+        args: [message, attestation],
+    });
+
+    return hash;
+}
+
+/**
+ * Completes the CCTP bridge by minting USDC on Ethereum
+ * This function retrieves the message and attestation from Circle's Iris API and mints on Ethereum
+ * Reference: https://developers.circle.com/cctp/transfer-usdc-on-testnet-from-ethereum-to-avalanche#3-retrieve-attestation
+ */
+async function completeCCTPBridge(
+    baseReceipt: any,
+    recipient: Address
+): Promise<`0x${string}`> {
+    // Step 1: Retrieve message and attestation from Circle's Iris API using transaction hash
+    // The API returns both the message and attestation, eliminating the need to extract from logs
+    showStatus('Retrieving attestation from Circle...', 'info');
+    const transactionHash = baseReceipt.transactionHash as `0x${string}`;
+    const sourceDomain = CCTP_DOMAIN_BASE;
+
+    const { message, attestation } = await retrieveAttestation(
+        transactionHash,
+        sourceDomain
+    );
+
+    // Step 2: Switch to Ethereum and mint
+    showStatus('Attestation received! Switching to Ethereum network...', 'info');
+    const mintTxHash = await mintOnEthereum(message, attestation, recipient);
+
+    return mintTxHash;
 }
 
 async function buildWithdrawZap(publicClient: any, connectedAddress: Address, vaultAddress: Address, deadline: bigint): Promise<ZapBuildResult> {
@@ -1369,7 +1673,7 @@ async function buildWithdrawZap(publicClient: any, connectedAddress: Address, va
                 minOutputAmount: 0n
             },
             {
-                token: WETH_ADDRESS,
+                token: WETH_ADDRESS_BASE,
                 minOutputAmount: 0n
             }
         ],
@@ -1391,7 +1695,7 @@ async function buildWithdrawZap(publicClient: any, connectedAddress: Address, va
     const {
         liquidityOffset: AERODROME_LIQUIDITY_OFFSET,
         data: aerodromeRemoveLiquidityCalldata,
-    } = locateAerodromeRemoveLiquidityOffsets(WETH_ADDRESS, USDC_ADDRESS, false, BEEFY_ZAP_ROUTER, deadline);
+    } = locateAerodromeRemoveLiquidityOffsets(WETH_ADDRESS_BASE, USDC_ADDRESS, false, BEEFY_ZAP_ROUTER, deadline);
 
     const route = [
         {
@@ -1406,12 +1710,12 @@ async function buildWithdrawZap(publicClient: any, connectedAddress: Address, va
             ],
         },
         {
-            target: AERODROME_ROUTER,
+            target: AERODROME_ROUTER_BASE,
             value: 0n,
             data: aerodromeRemoveLiquidityCalldata,
             tokens: [
                 {
-                    token: WETH_USDC_ADDRESS,
+                    token: WETH_USDC_ADDRESS_BASE,
                     index: AERODROME_LIQUIDITY_OFFSET,
                 },
             ],
@@ -1424,7 +1728,7 @@ async function buildWithdrawZap(publicClient: any, connectedAddress: Address, va
 function locateAerodromeRemoveLiquidityOffsets(tokenA: Address, tokenB: Address, stable: boolean, to: Address, deadline: bigint) {
     const SENT_LP = 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1n;
     const data = encodeFunctionData({
-        abi: AERODROME_ROUTER_ABI,
+        abi: AERODROME_ROUTER_BASE_ABI,
         functionName: 'removeLiquidity',
         args: [tokenA, tokenB, stable, SENT_LP, 0n, 0n, to, deadline],
     });
@@ -1535,18 +1839,22 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
 
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600 * 2);
 
-        // For deposit mode, build Metalos deposit (first call) and 4 Beefy deposits (calls 2-5)
+        // For deposit mode, build CCTP bridge (optional, early step) + Metalos deposit + Beefy deposits
         if (mode === 'deposit') {
             // Toggle variables to enable/disable each call in the batch
+            const ENABLE_CCTP_BRIDGE = true; // Bridge USDC from Base to Ethereum (runs first)
             const ENABLE_METALOS_DEPOSIT = false;
             const ENABLE_MODERATE_DEPOSIT = false;
             const ENABLE_RISKY_DEPOSIT = false;
-            const ENABLE_WETH_AERO_DEPOSIT = true;
+            const ENABLE_WETH_AERO_DEPOSIT = false;
+
+            // CCTP Bridge (runs first if enabled): Bridge USDC from Base to Ethereum
+            const cctpBridge = ENABLE_CCTP_BRIDGE ? buildCCTPBridge(AMOUNT, connectedAddress) : null;
 
             // Metalos vault deposit (direct, no zap router)
             const metalosDeposit = ENABLE_METALOS_DEPOSIT ? buildMetalosDeposit(AMOUNT) : null;
 
-            // Calls 2-5: Beefy zap router deposits
+            // Beefy zap router deposits
             const buildResult2 = ENABLE_MODERATE_DEPOSIT ? await buildModerateDepositZap(connectedAddress, deadline) : null;
             const buildResult3 = ENABLE_RISKY_DEPOSIT ? await buildRiskyDepositZap(connectedAddress, deadline) : null;
             const buildResult4 = ENABLE_WETH_AERO_DEPOSIT ? await buildWETHAERODepositZap(connectedAddress, deadline) : null;
@@ -1556,10 +1864,11 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
             const { order: order4, route: route4 } = buildResult4 || {};
 
             // Total amount needed: calculate based on enabled deposits
+            const cctpAmount = ENABLE_CCTP_BRIDGE ? cctpBridge!.inputAmount : 0n;
             const metalosAmount = ENABLE_METALOS_DEPOSIT ? metalosDeposit!.inputAmount : 0n;
             const enabledBeefyCount = [ENABLE_MODERATE_DEPOSIT, ENABLE_RISKY_DEPOSIT, ENABLE_WETH_AERO_DEPOSIT].filter(Boolean).length;
             const totalBeefyAmount = ENABLE_MODERATE_DEPOSIT && beefyInputAmount ? beefyInputAmount * BigInt(enabledBeefyCount) : 0n;
-            const totalInputAmount = metalosAmount + totalBeefyAmount;
+            const totalInputAmount = cctpAmount + metalosAmount + totalBeefyAmount;
 
             showStatus('Checking token approvals...', 'info');
 
@@ -1575,7 +1884,7 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
             }
 
             // Check balance for total amount needed
-            const inputToken = USDC_ADDRESS; // Both use USDC
+            const inputToken = USDC_ADDRESS_BASE; // All operations use USDC on Base
             try {
                 const balance = await publicClient.readContract({
                     address: inputToken,
@@ -1585,6 +1894,7 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
                 });
                 if (balance < totalInputAmount) {
                     const balanceBreakdown = [
+                        ENABLE_CCTP_BRIDGE ? '1x CCTP Bridge' : null,
                         ENABLE_METALOS_DEPOSIT ? '1x Metalos' : null,
                         enabledBeefyCount > 0 ? `${enabledBeefyCount}x Beefy` : null
                     ].filter(Boolean).join(' + ');
@@ -1601,15 +1911,40 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
                 showStatus(`⚠️ Could not verify balance: ${balanceError.message || 'Unknown error'}`, 'info');
             }
 
+            // Check and handle CCTP TokenMessenger approval (if bridge is enabled)
+            if (ENABLE_CCTP_BRIDGE && cctpBridge) {
+                let cctpAllowance: bigint;
+                try {
+                    cctpAllowance = await publicClient.readContract({
+                        address: USDC_ADDRESS_BASE,
+                        abi: USDC_ABI,
+                        functionName: 'allowance',
+                        args: [connectedAddress, CCTP_TOKEN_MESSENGER_BASE]
+                    });
+                    console.log(`USDC allowance to CCTP TokenMessenger:`, cctpAllowance.toString());
+                } catch (error: any) {
+                    console.error('Error reading CCTP allowance:', error);
+                    cctpAllowance = 0n;
+                }
+
+                // Note: If approval is needed, it will be included in the batch as the first call
+                // So we don't need to handle it separately here - it's part of buildCCTPBridge
+                if (cctpAllowance < cctpAmount) {
+                    console.log(`USDC approval to CCTP TokenMessenger will be included in batch`);
+                } else {
+                    console.log(`USDC has sufficient allowance for CCTP bridge`);
+                }
+            }
+
             // Check and handle Metalos vault approval (direct deposit, no asset() call)
             if (ENABLE_METALOS_DEPOSIT) {
                 let metalosAllowance: bigint;
                 try {
                     metalosAllowance = await publicClient.readContract({
-                        address: USDC_ADDRESS,
+                        address: USDC_ADDRESS_BASE,
                         abi: USDC_ABI,
                         functionName: 'allowance',
-                        args: [connectedAddress, METALOS_VAULT_ADDRESS]
+                        args: [connectedAddress, METALOS_VAULT_ADDRESS_BASE]
                     });
                     console.log(`USDC allowance to Metalos vault:`, metalosAllowance.toString());
                 } catch (error: any) {
@@ -1627,10 +1962,10 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
 
                     try {
                         const approveHash = await walletClient.writeContract({
-                            address: USDC_ADDRESS,
+                            address: USDC_ADDRESS_BASE,
                             abi: USDC_ABI,
                             functionName: 'approve',
-                            args: [METALOS_VAULT_ADDRESS, metalosAmount]
+                            args: [METALOS_VAULT_ADDRESS_BASE, metalosAmount]
                         });
 
                         showStatus(
@@ -1738,7 +2073,9 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
                 }
             }
 
-            // Encode calls: Metalos deposit (call 1) + Beefy executeOrder calls (calls 2-4)
+            // Encode calls: CCTP bridge (calls 1-2: approval + depositForBurn) + Metalos deposit + Beefy executeOrder calls
+            const cctpApprovalCall = ENABLE_CCTP_BRIDGE && cctpBridge ? cctpBridge.approvalCall : null;
+            const cctpBridgeCall = ENABLE_CCTP_BRIDGE && cctpBridge ? cctpBridge.bridgeCall : null;
             const callData1 = ENABLE_METALOS_DEPOSIT ? metalosDeposit!.data : null; // Metalos deposit call
 
             const callData2 = ENABLE_MODERATE_DEPOSIT && order2 && route2 ? encodeFunctionData({
@@ -1760,13 +2097,21 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
             }) : null;
 
             console.log('Encoded function selectors:', {
+                cctpApproval: cctpApprovalCall ? cctpApprovalCall.data.slice(0, 10) + ' (CCTP approval)' : 'disabled',
+                cctpBridge: cctpBridgeCall ? cctpBridgeCall.data.slice(0, 10) + ' (CCTP depositForBurn)' : 'disabled',
                 call1: callData1 ? callData1.slice(0, 10) + ' (Metalos deposit)' : 'disabled',
                 call2: callData2 ? callData2.slice(0, 10) + ' (Beefy executeOrder)' : 'disabled',
                 call3: callData3 ? callData3.slice(0, 10) + ' (Beefy executeOrder)' : 'disabled',
-                call4: callData4 ? callData4.slice(0, 10) + ' (Beefy executeOrder - WETH/cbBTC)' : 'disabled'
+                call4: callData4 ? callData4.slice(0, 10) + ' (Beefy executeOrder - WETH/AERO)' : 'disabled'
             });
-            const enabledCount = [ENABLE_METALOS_DEPOSIT, ENABLE_MODERATE_DEPOSIT, ENABLE_RISKY_DEPOSIT, ENABLE_WETH_AERO_DEPOSIT].filter(Boolean).length;
-            console.log(`Batching ${enabledCount} deposits atomically using EIP-5792`);
+            const enabledCount = [
+                ENABLE_CCTP_BRIDGE ? 1 : 0, // Bridge counts as 1 operation (approval + bridge are batched together)
+                ENABLE_METALOS_DEPOSIT ? 1 : 0,
+                ENABLE_MODERATE_DEPOSIT ? 1 : 0,
+                ENABLE_RISKY_DEPOSIT ? 1 : 0,
+                ENABLE_WETH_AERO_DEPOSIT ? 1 : 0
+            ].reduce((a, b) => a + b, 0);
+            console.log(`Batching ${enabledCount} operations atomically using EIP-5792`);
 
             showStatus('Checking EIP-5792 capabilities...', 'info');
 
@@ -1823,6 +2168,18 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
             const nativeInput4 = ENABLE_WETH_AERO_DEPOSIT && order4 ? order4.inputs.find(input => input.token === ZERO_ADDRESS) : null;
 
             const calls = [
+                // CCTP Bridge: Approval call (must come before depositForBurn)
+                ...(ENABLE_CCTP_BRIDGE && cctpApprovalCall ? [{
+                    to: cctpApprovalCall.to as `0x${string}`,
+                    data: cctpApprovalCall.data,
+                    value: cctpApprovalCall.value,
+                }] : []),
+                // CCTP Bridge: depositForBurn call
+                ...(ENABLE_CCTP_BRIDGE && cctpBridgeCall ? [{
+                    to: cctpBridgeCall.to as `0x${string}`,
+                    data: cctpBridgeCall.data,
+                    value: cctpBridgeCall.value,
+                }] : []),
                 // Metalos deposit
                 ...(ENABLE_METALOS_DEPOSIT && callData1 && metalosDeposit ? [{
                     to: metalosDeposit.to as `0x${string}`,
@@ -1841,7 +2198,7 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
                     data: callData3,
                     value: nativeInput3?.amount || 0n,
                 }] : []),
-                // WETH/cbBTC deposit
+                // WETH/AERO deposit
                 ...(ENABLE_WETH_AERO_DEPOSIT && callData4 ? [{
                     to: BEEFY_ZAP_ROUTER as `0x${string}`,
                     data: callData4,
@@ -1857,10 +2214,11 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
             console.debug('EIP-5792 sendCalls', { calls });
 
             const depositSummary = [
+                ENABLE_CCTP_BRIDGE ? '1 CCTP Bridge' : null,
                 ENABLE_METALOS_DEPOSIT ? '1 Metalos' : null,
                 enabledBeefyCount > 0 ? `${enabledBeefyCount} Beefy` : null
             ].filter(Boolean).join(' + ');
-            showStatus(`Submitting batched transaction (${depositSummary} deposits) via EIP-5792...`, 'info');
+            showStatus(`Submitting batched transaction (${depositSummary}) via EIP-5792...`, 'info');
 
             try {
                 const result = await walletClient.sendCalls(sendCallsParams);
@@ -1960,13 +2318,59 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
                 });
                 console.log('Batched transaction receipt:', batchReceipt);
 
+                const operationsSummary = [
+                    ENABLE_CCTP_BRIDGE ? 'CCTP bridge (Base→Ethereum)' : null,
+                    ENABLE_METALOS_DEPOSIT ? 'Metalos deposit' : null,
+                    enabledBeefyCount > 0 ? `${enabledBeefyCount} Beefy deposit(s)` : null
+                ].filter(Boolean).join(' + ');
                 showStatus(
                     `✅ Batched transaction confirmed! Hash: ${batchReceipt.transactionHash}\n\n` +
                     `Block: ${batchReceipt.blockNumber}\n` +
                     `Gas used: ${batchReceipt.gasUsed.toString()}\n` +
-                    `Executed 1 Metalos deposit + 4 Beefy deposits atomically via EIP-5792`,
+                    `Executed: ${operationsSummary} atomically via EIP-5792`,
                     'success'
                 );
+
+                // If CCTP bridge was enabled, complete the minting process on Ethereum
+                if (ENABLE_CCTP_BRIDGE) {
+                    try {
+                        showStatus('Starting CCTP minting process on Ethereum...', 'info');
+                        const mintTxHash = await completeCCTPBridge(batchReceipt, connectedAddress);
+
+                        // Wait for mint transaction confirmation
+                        const ethereumPublicClient = createPublicClient({
+                            chain: MAINNET ? mainnet : sepolia,
+                            transport: custom(window.ethereum!),
+                        });
+
+                        showStatus(
+                            `Mint transaction submitted: ${mintTxHash}\n` +
+                            `Waiting for confirmation on Ethereum...`,
+                            'info'
+                        );
+
+                        const mintReceipt = await ethereumPublicClient.waitForTransactionReceipt({
+                            hash: mintTxHash
+                        });
+
+                        showStatus(
+                            `✅ CCTP Bridge Complete!\n\n` +
+                            `Burn (Base): ${batchReceipt.transactionHash}\n` +
+                            `Mint (Ethereum): ${mintReceipt.transactionHash}\n\n` +
+                            `USDC has been successfully bridged from Base to Ethereum!`,
+                            'success'
+                        );
+                    } catch (mintError: any) {
+                        console.error('CCTP minting error:', mintError);
+                        showStatus(
+                            `⚠️ CCTP minting failed: ${mintError.message || 'Unknown error'}\n\n` +
+                            `The burn on Base was successful (${batchReceipt.transactionHash}), ` +
+                            `but minting on Ethereum failed. You can manually complete the mint ` +
+                            `by calling receiveMessage on Ethereum's MessageTransmitter contract.`,
+                            'error'
+                        );
+                    }
+                }
             } catch (sendCallsError: any) {
                 console.error('EIP-5792 sendCalls error:', sendCallsError);
                 showStatus(
@@ -1979,7 +2383,7 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
             }
         } else {
             // Withdraw mode - keep original logic
-            const buildResult = await buildWithdrawZap(publicClient, connectedAddress, MODERATE_VAULT_ADDRESS, deadline);
+            const buildResult = await buildWithdrawZap(publicClient, connectedAddress, MODERATE_VAULT_ADDRESS_BASE, deadline);
             const { order, route, inputToken, inputAmount } = buildResult;
 
             showStatus('Checking token approvals...', 'info');
