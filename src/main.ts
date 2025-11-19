@@ -1579,6 +1579,52 @@ async function switchToEthereum(): Promise<void> {
 }
 
 /**
+ * Switches the wallet back to Base network
+ */
+async function switchToBase(): Promise<void> {
+    const baseChainId = MAINNET ? base.id : baseSepolia.id;
+
+    try {
+        await window.ethereum?.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: `0x${baseChainId.toString(16)}` }],
+        });
+    } catch (switchError: any) {
+        // If the chain doesn't exist, try to add it
+        if (switchError.code === 4902) {
+            const chainParams = MAINNET ? {
+                chainId: `0x${base.id.toString(16)}`,
+                chainName: 'Base',
+                nativeCurrency: {
+                    name: 'Ether',
+                    symbol: 'ETH',
+                    decimals: 18,
+                },
+                rpcUrls: ['https://mainnet.base.org'],
+                blockExplorerUrls: ['https://basescan.org'],
+            } : {
+                chainId: `0x${baseSepolia.id.toString(16)}`,
+                chainName: 'Base Sepolia',
+                nativeCurrency: {
+                    name: 'Ether',
+                    symbol: 'ETH',
+                    decimals: 18,
+                },
+                rpcUrls: ['https://sepolia.base.org'],
+                blockExplorerUrls: ['https://sepolia.basescan.org'],
+            };
+
+            await window.ethereum?.request({
+                method: 'wallet_addEthereumChain',
+                params: [chainParams],
+            });
+        } else {
+            throw switchError;
+        }
+    }
+}
+
+/**
  * Mints USDC on Ethereum by calling receiveMessage on MessageTransmitterV2
  * Reference: https://developers.circle.com/cctp/transfer-usdc-on-testnet-from-ethereum-to-avalanche#4-mint-usdc
  */
@@ -1762,6 +1808,7 @@ const accountAddress = document.getElementById('accountAddress') as HTMLSpanElem
 const statusDiv = document.getElementById('status') as HTMLDivElement;
 
 let connectedAddress: Address | null = null;
+let isCCTPMinting = false; // Flag to prevent page reload during CCTP minting
 
 // Connect to MetaMask
 connectBtn.addEventListener('click', async () => {
@@ -2334,6 +2381,9 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
                 // If CCTP bridge was enabled, complete the minting process on Ethereum
                 if (ENABLE_CCTP_BRIDGE) {
                     try {
+                        // Set flag to prevent page reload during chain switch
+                        isCCTPMinting = true;
+
                         showStatus('Starting CCTP minting process on Ethereum...', 'info');
                         const mintTxHash = await completeCCTPBridge(batchReceipt, connectedAddress);
 
@@ -2369,6 +2419,21 @@ async function runExecuteOrder(mode: 'deposit' | 'withdraw') {
                             `by calling receiveMessage on Ethereum's MessageTransmitter contract.`,
                             'error'
                         );
+                    } finally {
+                        // Switch back to Base network
+                        try {
+                            showStatus('Switching back to Base network...', 'info');
+                            await switchToBase();
+                        } catch (switchError: any) {
+                            console.error('Error switching back to Base:', switchError);
+                            showStatus(
+                                `⚠️ Could not switch back to Base: ${switchError.message}\n` +
+                                `Please switch manually to continue using the app.`,
+                                'error'
+                            );
+                        }
+                        // Re-enable page reload on chain changes
+                        isCCTPMinting = false;
                     }
                 }
             } catch (sendCallsError: any) {
@@ -2614,8 +2679,11 @@ if (typeof window.ethereum !== 'undefined') {
     });
 
     // Listen for chain changes
+    // Don't reload if we're in the middle of CCTP minting process
     window.ethereum.on('chainChanged', () => {
-        window.location.reload();
+        if (!isCCTPMinting) {
+            window.location.reload();
+        }
     });
 }
 
