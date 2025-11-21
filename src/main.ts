@@ -739,13 +739,6 @@ const MORPHO_VAULT_ABI = parseAbi([
     'function asset() view returns (address)',
 ]);
 
-// Morpho Ethereum General Adapter ABI
-// The adapter is used to interact with Morpho vaults
-const MORPHO_ADAPTER_ABI = parseAbi([
-    'function deposit(address vault, uint256 assets, address receiver, bytes data) returns (uint256 shares)',
-    'function deposit(address vault, uint256 assets, address receiver) returns (uint256 shares)',
-]);
-
 const KYBER_API_BASE_BASE = 'https://aggregator-api.kyberswap.com/base/api/v1';
 const KYBER_API_BASE_ETHEREUM = 'https://aggregator-api.kyberswap.com/ethereum/api/v1';
 const KYBER_CLIENT_ID = 'atomic-batching-poc';
@@ -1140,7 +1133,7 @@ async function buildEthereumBatch(
             ],
         },
         {
-            target: MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM, // Use vault directly (not adapter)
+            target: MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM, // Use vault directly
             value: 0n,
             data: vaultDepositData,
             tokens: [
