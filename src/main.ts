@@ -1,11 +1,11 @@
 import { type Address } from 'viem';
 import { showStatus as showStatusUtil, connectToMetaMask } from './utils';
+import { type BridgingUIState } from './bridging';
 import {
     runBaseDepositBatch,
-    runWithdrawal,
     testEthereumDepositBatchOnly,
-    type BridgingUIState
-} from './bridging';
+} from './deposit';
+import { runEthereumWithdrawalBatch } from './withdrawal';
 // Re-export constants for backward compatibility
 export * from './constants';
 // Re-export ABIs for backward compatibility
@@ -61,7 +61,7 @@ sendDepositBatchBtn.addEventListener('click', () => runBaseDepositBatch(uiState)
 testEthereumDepositBatchBtn.addEventListener('click', () => testEthereumDepositBatchOnly(uiState));
 
 // Withdraw from vault (withdraw + swap + bridge)
-withdrawBtn.addEventListener('click', () => runWithdrawal(uiState));
+withdrawBtn.addEventListener('click', () => runEthereumWithdrawalBatch(uiState));
 
 // Helper function to show status messages (wrapper that uses statusDiv)
 function showStatus(message: string, type: 'success' | 'error' | 'info') {
