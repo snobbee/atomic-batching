@@ -96,3 +96,55 @@ export async function kyberEncodeSwap(params: {
     };
 }
 
+/**
+ * Estimates the output amount for a KyberSwap swap
+ * @returns The estimated output amount in the output token's smallest unit
+ */
+export async function estimateKyberSwapOutput(params: {
+    tokenIn: Address;
+    tokenOut: Address;
+    amountIn: bigint;
+    clientId?: string;
+    chain?: 'base' | 'ethereum';
+}): Promise<bigint> {
+    const routeHeaders = params.clientId ? { 'x-client-id': params.clientId } : undefined;
+    const apiBase = params.chain === 'ethereum' ? KYBER_API_BASE_ETHEREUM : KYBER_API_BASE_BASE;
+
+    const query = new URLSearchParams({
+        tokenIn: params.tokenIn,
+        tokenOut: params.tokenOut,
+        amountIn: params.amountIn.toString(),
+    });
+    const routeRes = await fetch(`${apiBase}/routes?${query.toString()}`, {
+        headers: routeHeaders,
+    });
+    const routeRaw = await routeRes.text();
+    let routeJson: any;
+    try {
+        routeJson = JSON.parse(routeRaw);
+    } catch {
+        routeJson = undefined;
+    }
+    if (!routeRes.ok) {
+        throw new Error(`Kyber route: ${routeJson?.message || routeRaw || routeRes.statusText}`);
+    }
+    if (!routeJson) {
+        throw new Error('Kyber route: invalid JSON response');
+    }
+
+    const routeSummary = routeJson?.data?.routeSummary;
+    if (!routeSummary) {
+        throw new Error('Kyber route missing routeSummary');
+    }
+
+    // The routeSummary should contain the output amount
+    // KyberSwap API typically returns it as amountOut (string representation of the amount)
+    const amountOut = routeSummary.amountOut || routeSummary.amountOutUsd;
+    if (!amountOut) {
+        throw new Error('Kyber route missing amountOut in routeSummary. Available fields: ' + JSON.stringify(Object.keys(routeSummary)));
+    }
+
+    // Convert to BigInt (handle both string and number formats)
+    return BigInt(amountOut.toString());
+}
+
