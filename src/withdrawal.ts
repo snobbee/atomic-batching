@@ -22,11 +22,31 @@ import { MAINNET } from './constants';
 import { retrieveAttestation, buildCCTPBridge, type BridgingUIState } from './bridging';
 import { kyberEncodeSwap, estimateKyberSwapOutput } from './swap';
 
+const BPS_DENOMINATOR = 10_000n;
+// Kyber’s ZaaS routes are signed, so we can’t patch the calldata amount at execution time.
+// To avoid “insufficient balance” reverts when Morpho redeems slightly less rUSD than previewRedeem,
+// request materially less input than the estimate. This is a 2% buffer (200 bps) by default.
+const KYBER_SWAP_MARGIN_BPS = 200n;
+
+const applySwapSafetyMargin = (amount: bigint): bigint => {
+    if (amount <= 1n) {
+        return amount;
+    }
+
+    const margin = (amount * KYBER_SWAP_MARGIN_BPS) / BPS_DENOMINATOR;
+    if (margin === 0n) {
+        return amount - 1n;
+    }
+
+    return amount - margin;
+};
+
 /**
  * Builds Ethereum withdrawal batch: Beefy zap (withdraw from vault + swap rUSD to USDC)
  */
 export async function buildEthereumWithdrawalBatch(
     sharesAmount: bigint, // Amount of vault shares to withdraw
+    swapRusdAmount: bigint, // Estimated rUSD amount withdrawn from the vault
     recipient: Address,
     deadline: bigint
 ): Promise<{
@@ -39,21 +59,28 @@ export async function buildEthereumWithdrawalBatch(
     beefyRoute: any[];
 }> {
     // Build Beefy zap: withdraw from vault + swap rUSD to USDC
+
     // Step 1: Withdraw/redeem from Morpho vault to get rUSD
+    // IMPORTANT: For Morpho's ERC4626 redeem(shares, receiver, owner):
+    // - shares: The exact amount to redeem (we encode it directly, NOT using index patching)
+    // - receiver: Where the underlying assets (rUSD) go → Beefy Zap Router
+    // - owner: Who owns the shares being redeemed → Beefy Zap Router (it holds them after TokenManager pulls from user)
     const vaultWithdrawData = encodeFunctionData({
         abi: MORPHO_VAULT_ABI,
         functionName: 'redeem',
-        args: [0n, recipient, recipient], // shares amount will be replaced with balance in the zap router
+        args: [
+            sharesAmount,              // Exact shares amount (not 0n!)
+            BEEFY_ZAP_ROUTER_ETHEREUM, // Receiver: router gets the rUSD
+            BEEFY_ZAP_ROUTER_ETHEREUM, // Owner: router holds the shares at execution time
+        ],
     });
 
     // Step 2: Swap rUSD to USDC using KyberSwap
-    // Use a placeholder amount - the Beefy router will replace it with the actual rUSD balance from vault withdrawal
-    // Using 1e18 (1 token) as placeholder for route calculation - router will replace amountIn in calldata using index: 4
-    const placeholderAmount = 1000000000000000000n; // 1 rUSD (18 decimals) - placeholder for route calculation
+    // Build calldata with the expected rUSD output so Kyber finds the proper route.
     const kyberSwap = await kyberEncodeSwap({
         tokenIn: RUSD_ADDRESS_ETHEREUM,
         tokenOut: USDC_ADDRESS_ETHEREUM,
-        amountIn: placeholderAmount,
+        amountIn: swapRusdAmount,
         zapRouter: BEEFY_ZAP_ROUTER_ETHEREUM,
         slippageBps: 50,
         deadlineSec: Number(deadline),
@@ -74,6 +101,11 @@ export async function buildEthereumWithdrawalBatch(
                 token: USDC_ADDRESS_ETHEREUM,
                 minOutputAmount: 0n, // Accept any amount of USDC
             },
+            {
+                // Include rUSD in outputs to handle any dust/leftover from the swap
+                token: RUSD_ADDRESS_ETHEREUM,
+                minOutputAmount: 0n,
+            },
         ],
         relay: {
             target: ZERO_ADDRESS,
@@ -92,11 +124,7 @@ export async function buildEthereumWithdrawalBatch(
             tokens: [
                 {
                     token: MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM,
-                    index: -1, // Approve vault shares, use order input amount
-                },
-                {
-                    token: RUSD_ADDRESS_ETHEREUM,
-                    index: 0, // Track rUSD output from vault withdrawal (router automatically tracks balance)
+                    index: -1, // Approve vault shares to the vault (for redeem)
                 },
             ],
         },
@@ -107,7 +135,7 @@ export async function buildEthereumWithdrawalBatch(
             tokens: [
                 {
                     token: RUSD_ADDRESS_ETHEREUM,
-                    index: 4, // Replace amountIn parameter in KyberSwap calldata with tracked rUSD balance (offset 4 = after 4-byte function selector)
+                    index: -1, // Approve rUSD to KyberSwap router
                 },
             ],
         },
@@ -333,13 +361,19 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
             args: [vaultBalance]
         });
 
-        uiState.showStatus(`Estimated rUSD: ${rusdAmount.toString()}\nEstimating USDC output...`, 'info');
+        const swapRusdAmount = applySwapSafetyMargin(rusdAmount);
+        uiState.showStatus(
+            `Estimated rUSD: ${rusdAmount.toString()}\n` +
+            `Swap input after ${KYBER_SWAP_MARGIN_BPS.toString()} bps margin: ${swapRusdAmount.toString()}\n` +
+            `Estimating USDC output...`,
+            'info'
+        );
 
         // Estimate USDC output from swap
         const estimatedUsdcOutput = await estimateKyberSwapOutput({
             tokenIn: RUSD_ADDRESS_ETHEREUM,
             tokenOut: USDC_ADDRESS_ETHEREUM,
-            amountIn: rusdAmount,
+            amountIn: swapRusdAmount,
             clientId: KYBER_CLIENT_ID,
             chain: 'ethereum',
         });
@@ -348,16 +382,18 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
 
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600 * 2);
 
-        // Build withdrawal batch (only withdraw + swap, no bridge)
-        // Note: KyberSwap route is built with placeholder amount, router will replace it with actual rUSD balance
-        const withdrawalBatch = await buildEthereumWithdrawalBatch(vaultBalance, uiState.connectedAddress, deadline);
+        // Build withdrawal batch (withdraw + swap via Beefy Zap)
+        const withdrawalBatch = await buildEthereumWithdrawalBatch(
+            vaultBalance,
+            swapRusdAmount,
+            uiState.connectedAddress,
+            deadline
+        );
 
         // Build CCTP bridge calls with estimated USDC amount
         const cctpBridge = buildCCTPBridge(estimatedUsdcOutput, uiState.connectedAddress, 'ethereum');
 
-        // Check approvals
-        // 1. Check vault shares approval for Beefy Token Manager
-        // Vault shares are ERC20 tokens, so we use USDC_ABI (which has approve/allowance)
+        // Check vault shares approval for Beefy Token Manager
         const tokenManagerAddress = await publicClient.readContract({
             address: BEEFY_ZAP_ROUTER_ETHEREUM,
             abi: BEEFY_ROUTER_MINI_ABI,
@@ -366,16 +402,16 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
 
         const vaultAllowance = await publicClient.readContract({
             address: MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM,
-            abi: USDC_ABI, // Vault shares are ERC20, use same ABI
+            abi: USDC_ABI,
             functionName: 'allowance',
             args: [uiState.connectedAddress, tokenManagerAddress]
-        }).catch(() => 0n); // If allowance doesn't exist, assume 0
+        }).catch(() => 0n);
 
         // Build approval call if needed
         const approvalCalls = [];
         if (vaultAllowance < vaultBalance) {
             const vaultApprovalData = encodeFunctionData({
-                abi: USDC_ABI, // Vault shares are ERC20, use same ABI
+                abi: USDC_ABI,
                 functionName: 'approve',
                 args: [tokenManagerAddress, vaultBalance]
             });
@@ -385,9 +421,6 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
                 value: 0n,
             });
         }
-
-        // Note: USDC approval for CCTP TokenMessenger is included in cctpBridge.approvalCall
-        // No need to check or add it separately
 
         // Check EIP-5792 support
         const capabilities = await walletClient.getCapabilities();
@@ -401,8 +434,6 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
         }
 
         // Prepare batch calls: approvals (vault shares) + Beefy zap (withdraw + swap) + USDC approval + bridge
-        // The Beefy zap route handles: withdraw + swap
-        // USDC approval and bridge call are batched separately in EIP-5792
         const calls = [
             ...approvalCalls.map(call => ({
                 to: call.to as `0x${string}`,
@@ -414,17 +445,22 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
                 data: withdrawalBatch.beefyZapCall.data,
                 value: withdrawalBatch.beefyZapCall.value,
             },
-            // {
-            //     to: cctpBridge.approvalCall.to as `0x${string}`,
-            //     data: cctpBridge.approvalCall.data,
-            //     value: cctpBridge.approvalCall.value,
-            // },
-            // {
-            //     to: cctpBridge.bridgeCall.to as `0x${string}`,
-            //     data: cctpBridge.bridgeCall.data,
-            //     value: cctpBridge.bridgeCall.value,
-            // },
+            {
+                to: cctpBridge.approvalCall.to as `0x${string}`,
+                data: cctpBridge.approvalCall.data,
+                value: cctpBridge.approvalCall.value,
+            },
+            {
+                to: cctpBridge.bridgeCall.to as `0x${string}`,
+                data: cctpBridge.bridgeCall.data,
+                value: cctpBridge.bridgeCall.value,
+            },
         ];
+
+        console.debug(
+            '[withdrawal] Kyber route tokens:',
+            JSON.stringify(withdrawalBatch.beefyRoute[1]?.tokens || [], null, 2)
+        );
 
         uiState.showStatus('Submitting withdrawal batch transaction...', 'info');
 
@@ -494,7 +530,16 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
         await runBaseWithdrawalBatch(message, attestation, uiState);
 
     } catch (error: any) {
-        console.error('Withdrawal error:', error);
+        console.error('Withdrawal error (raw):', error);
+        if (error?.cause) {
+            console.error('Withdrawal error cause:', error.cause);
+        }
+        if (error?.shortMessage || error?.data) {
+            console.error('Withdrawal error details:', {
+                shortMessage: error.shortMessage,
+                data: error.data,
+            });
+        }
         uiState.showStatus(`❌ Error: ${error.message || 'Unknown error'}`, 'error');
     } finally {
         toggleButtons(false);
