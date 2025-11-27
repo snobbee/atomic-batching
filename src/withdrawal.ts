@@ -47,6 +47,7 @@ const applySwapSafetyMargin = (amount: bigint): bigint => {
 export async function buildEthereumWithdrawalBatch(
     sharesAmount: bigint, // Amount of vault shares to withdraw
     swapRusdAmount: bigint, // Estimated rUSD amount withdrawn from the vault
+    expectedUsdcOutput: bigint, // Expected USDC amount from swap (for CCTP bridge)
     recipient: Address,
     deadline: bigint
 ): Promise<{
@@ -88,7 +89,11 @@ export async function buildEthereumWithdrawalBatch(
         chain: 'ethereum',
     });
 
+    // Step 3 & 4: Build CCTP bridge (approval + depositForBurn)
+    const cctpBridge = buildCCTPBridge(expectedUsdcOutput, recipient, 'ethereum');
+
     // Build Beefy zap order and route
+    // Note: Since USDC is bridged away, we only expect dust/leftover tokens as outputs
     const order = {
         inputs: [
             {
@@ -98,12 +103,13 @@ export async function buildEthereumWithdrawalBatch(
         ],
         outputs: [
             {
-                token: USDC_ADDRESS_ETHEREUM,
-                minOutputAmount: 0n, // Accept any amount of USDC
-            },
-            {
                 // Include rUSD in outputs to handle any dust/leftover from the swap
                 token: RUSD_ADDRESS_ETHEREUM,
+                minOutputAmount: 0n,
+            },
+            {
+                // Include USDC in outputs to handle any dust/leftover after bridging
+                token: USDC_ADDRESS_ETHEREUM,
                 minOutputAmount: 0n,
             },
         ],
@@ -136,6 +142,23 @@ export async function buildEthereumWithdrawalBatch(
                 {
                     token: RUSD_ADDRESS_ETHEREUM,
                     index: -1, // Approve rUSD to KyberSwap router
+                },
+            ],
+        },
+        {
+            target: cctpBridge.approvalCall.to,
+            value: cctpBridge.approvalCall.value,
+            data: cctpBridge.approvalCall.data,
+            tokens: [], // No token approvals needed for USDC approval call
+        },
+        {
+            target: cctpBridge.bridgeCall.to,
+            value: cctpBridge.bridgeCall.value,
+            data: cctpBridge.bridgeCall.data,
+            tokens: [
+                {
+                    token: USDC_ADDRESS_ETHEREUM,
+                    index: -1, // Approve USDC to TokenMessenger for depositForBurn
                 },
             ],
         },
@@ -382,16 +405,14 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
 
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600 * 2);
 
-        // Build withdrawal batch (withdraw + swap via Beefy Zap)
+        // Build withdrawal batch (withdraw + swap + bridge via Beefy Zap)
         const withdrawalBatch = await buildEthereumWithdrawalBatch(
             vaultBalance,
             swapRusdAmount,
+            estimatedUsdcOutput,
             uiState.connectedAddress,
             deadline
         );
-
-        // Build CCTP bridge calls with estimated USDC amount
-        const cctpBridge = buildCCTPBridge(estimatedUsdcOutput, uiState.connectedAddress, 'ethereum');
 
         // Check vault shares approval for Beefy Token Manager
         const tokenManagerAddress = await publicClient.readContract({
@@ -433,7 +454,7 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
             return;
         }
 
-        // Prepare batch calls: approvals (vault shares) + Beefy zap (withdraw + swap) + USDC approval + bridge
+        // Prepare batch calls: vault shares approval (if needed) + Beefy zap (withdraw + swap + bridge)
         const calls = [
             ...approvalCalls.map(call => ({
                 to: call.to as `0x${string}`,
@@ -444,16 +465,6 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
                 to: withdrawalBatch.beefyZapCall.to as `0x${string}`,
                 data: withdrawalBatch.beefyZapCall.data,
                 value: withdrawalBatch.beefyZapCall.value,
-            },
-            {
-                to: cctpBridge.approvalCall.to as `0x${string}`,
-                data: cctpBridge.approvalCall.data,
-                value: cctpBridge.approvalCall.value,
-            },
-            {
-                to: cctpBridge.bridgeCall.to as `0x${string}`,
-                data: cctpBridge.bridgeCall.data,
-                value: cctpBridge.bridgeCall.value,
             },
         ];
 
@@ -516,7 +527,7 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
             `✅ Withdrawal batch confirmed!\n` +
             `Transaction: ${receipt.transactionHash}\n` +
             `Block: ${receipt.blockNumber}\n\n` +
-            `Retrieving attestation for Base mint...`,
+            `USDC has been bridged to Base! Retrieving attestation for mint...`,
             'success'
         );
 
