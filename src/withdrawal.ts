@@ -14,11 +14,15 @@ import {
     CCTP_MESSAGE_TRANSMITTER_ABI,
     BEEFY_ROUTER_MINI_ABI,
     MORPHO_VAULT_ABI,
-    BEEFY_ZAP_EXECUTE_ORDER_ABI
+    BEEFY_ZAP_EXECUTE_ORDER_ABI,
+    AERODROME_WITHDRAW_ABI,
+    ERC20_ABI
 } from './abis';
-import { getIsMainnet } from './constants';
+import { getIsMainnet, getUSDCAddressBase, getUSDCAddressEthereum, getAerodromeRouterBase, type SingleAssetVaultConfig } from './constants';
 import { retrieveAttestation, buildCCTPBridge, type BridgingUIState } from './bridging';
 import { kyberEncodeSwap, estimateKyberSwapOutput } from './swap';
+import { locateAerodromeRemoveLiquidityOffsets } from './utils';
+import { MaxUint256 } from 'ethers';
 
 const BPS_DENOMINATOR = 10_000n;
 // Kyber’s ZaaS routes are signed, so we can’t patch the calldata amount at execution time.
@@ -41,6 +45,7 @@ const applySwapSafetyMargin = (amount: bigint): bigint => {
 
 /**
  * Builds withdrawal batch: Beefy zap (withdraw from vault + swap output token to input token + bridge if needed)
+ * Routes to the appropriate function based on vault type
  */
 export async function buildWithdrawalBatch(
     vault: VaultConfig,
@@ -59,8 +64,38 @@ export async function buildWithdrawalBatch(
     beefyOrder: any;
     beefyRoute: any[];
 }> {
-    // Build Beefy zap: withdraw from vault + swap output token to input token
+    // Handle different vault types
+    if (vault.type === 'single-asset') {
+        return await buildSingleAssetWithdrawal(vault, sharesAmount, swapOutputTokenAmount, expectedInputTokenOutput, recipient, deadline, needsBridging);
+    } else if (vault.type === 'lp-usdc') {
+        return await buildLPUSDCWithdrawal(vault, sharesAmount, recipient, deadline, needsBridging);
+    } else if (vault.type === 'lp-non-usdc') {
+        return await buildLPNonUSDCWithdrawal(vault, sharesAmount, recipient, deadline, needsBridging);
+    } else {
+        throw new Error(`Unknown vault type: ${(vault as any).type}`);
+    }
+}
 
+/**
+ * Build withdrawal zap for single asset vault (e.g., Morpho RUSD)
+ */
+async function buildSingleAssetWithdrawal(
+    vault: SingleAssetVaultConfig,
+    sharesAmount: bigint,
+    swapOutputTokenAmount: bigint,
+    expectedInputTokenOutput: bigint,
+    recipient: Address,
+    deadline: bigint,
+    needsBridging: boolean
+): Promise<{
+    beefyZapCall: {
+        to: Address;
+        data: `0x${string}`;
+        value: bigint;
+    };
+    beefyOrder: any;
+    beefyRoute: any[];
+}> {
     // Step 1: Withdraw/redeem from vault to get output token
     // IMPORTANT: For ERC4626 redeem(shares, receiver, owner):
     // - shares: The exact amount to redeem (we encode it directly, NOT using index patching)
@@ -154,6 +189,362 @@ export async function buildWithdrawalBatch(
 
     // Build Beefy zap order and route
     // Note: If bridging, input token is bridged away, so we only expect dust/leftover tokens as outputs
+    const order = {
+        inputs: [
+            {
+                token: vault.vaultAddress, // Input: vault shares
+                amount: sharesAmount,
+            },
+        ],
+        outputs,
+        relay: {
+            target: ZERO_ADDRESS,
+            value: 0n,
+            data: '0x' as `0x${string}`,
+        },
+        user: recipient,
+        recipient: recipient,
+    };
+
+    const beefyZapData = encodeFunctionData({
+        abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+        functionName: 'executeOrder',
+        args: [order, route],
+    });
+
+    return {
+        beefyZapCall: {
+            to: vault.beefyZapRouter,
+            data: beefyZapData,
+            value: 0n,
+        },
+        beefyOrder: order,
+        beefyRoute: route,
+    };
+}
+
+/**
+ * Build withdrawal zap for LP vault with USDC (e.g., WETH-USDC Aerodrome LP)
+ * Flow: withdraw LP tokens from vault → remove liquidity → swap non-USDC token to USDC → transfer all USDC to recipient
+ */
+async function buildLPUSDCWithdrawal(
+    vault: Extract<VaultConfig, { type: 'lp-usdc' }>,
+    sharesAmount: bigint,
+    recipient: Address,
+    deadline: bigint,
+    needsBridging: boolean
+): Promise<{
+    beefyZapCall: {
+        to: Address;
+        data: `0x${string}`;
+        value: bigint;
+    };
+    beefyOrder: any;
+    beefyRoute: any[];
+}> {
+    // Get USDC address based on network
+    const usdcAddress = vault.network === 'base' ? getUSDCAddressBase() : getUSDCAddressEthereum();
+
+    // Step 1: Withdraw LP tokens from vault
+    const vaultWithdrawData = encodeFunctionData({
+        abi: AERODROME_WITHDRAW_ABI,
+        functionName: 'withdraw',
+        args: [sharesAmount],
+    });
+
+    // Step 2: Get Aerodrome removeLiquidity calldata with offsets
+    const {
+        liquidityOffset: AERODROME_LIQUIDITY_OFFSET,
+        data: aerodromeRemoveLiquidityCalldata,
+    } = locateAerodromeRemoveLiquidityOffsets(vault.tokenA, vault.tokenB, vault.isStable, vault.beefyZapRouter, deadline);
+
+    // Step 3: Swap non-USDC token (tokenA) to USDC
+    // Note: We'll use a placeholder amount for the swap - the actual amount will be determined by the LP token balance after removeLiquidity
+    // For estimation purposes, we'll use a reasonable amount (this will be replaced with balance in the route)
+    const estimatedTokenAAmount = 1000000000000000000n; // 1 token (18 decimals) - placeholder
+    const kyberSwap = await kyberEncodeSwap({
+        tokenIn: vault.tokenA, // Non-USDC token (e.g., WETH)
+        tokenOut: usdcAddress,
+        amountIn: estimatedTokenAAmount,
+        zapRouter: vault.beefyZapRouter,
+        slippageBps: 50,
+        deadlineSec: Number(deadline),
+        clientId: KYBER_CLIENT_ID,
+        chain: vault.kyberChain,
+    });
+
+    // Build route: withdraw LP → remove liquidity → swap tokenA to USDC
+    const route: any[] = [
+        {
+            target: vault.vaultAddress,
+            value: 0n,
+            data: vaultWithdrawData,
+            tokens: [
+                {
+                    token: vault.vaultAddress,
+                    index: -1, // Approve vault shares to the vault (for withdraw)
+                },
+            ],
+        },
+        {
+            target: getAerodromeRouterBase(),
+            value: 0n,
+            data: aerodromeRemoveLiquidityCalldata,
+            tokens: [
+                {
+                    token: vault.lpTokenAddress,
+                    index: AERODROME_LIQUIDITY_OFFSET, // Replace liquidity parameter with LP token balance
+                },
+            ],
+        },
+        {
+            target: kyberSwap.routerAddress,
+            value: kyberSwap.value,
+            data: kyberSwap.data,
+            tokens: [
+                {
+                    token: vault.tokenA,
+                    index: -1, // Approve tokenA to KyberSwap router (balance after removeLiquidity)
+                },
+            ],
+        },
+    ];
+
+    // Build outputs: USDC (and any dust from tokenA)
+    const outputs: any[] = [
+        {
+            token: usdcAddress,
+            minOutputAmount: 0n,
+        },
+        {
+            token: vault.tokenA,
+            minOutputAmount: 0n, // Handle any dust
+        },
+    ];
+
+    // Step 4: Build CCTP bridge (approval + depositForBurn) if needed
+    if (needsBridging) {
+        // Estimate USDC output (will be refined based on actual amounts)
+        const estimatedUSDC = 1000000n; // 1 USDC (6 decimals) - placeholder
+        const cctpBridge = buildCCTPBridge(estimatedUSDC, recipient, vault.network === 'eth' ? 'ethereum' : 'base');
+
+        route.push(
+            {
+                target: cctpBridge.approvalCall.to,
+                value: cctpBridge.approvalCall.value,
+                data: cctpBridge.approvalCall.data,
+                tokens: [],
+            },
+            {
+                target: cctpBridge.bridgeCall.to,
+                value: cctpBridge.bridgeCall.value,
+                data: cctpBridge.bridgeCall.data,
+                tokens: [
+                    {
+                        token: usdcAddress,
+                        index: -1, // Approve USDC to TokenMessenger for depositForBurn
+                    },
+                ],
+            }
+        );
+    }
+
+    const order = {
+        inputs: [
+            {
+                token: vault.vaultAddress, // Input: vault shares
+                amount: sharesAmount,
+            },
+        ],
+        outputs,
+        relay: {
+            target: ZERO_ADDRESS,
+            value: 0n,
+            data: '0x' as `0x${string}`,
+        },
+        user: recipient,
+        recipient: recipient,
+    };
+
+    const beefyZapData = encodeFunctionData({
+        abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+        functionName: 'executeOrder',
+        args: [order, route],
+    });
+
+    return {
+        beefyZapCall: {
+            to: vault.beefyZapRouter,
+            data: beefyZapData,
+            value: 0n,
+        },
+        beefyOrder: order,
+        beefyRoute: route,
+    };
+}
+
+/**
+ * Build withdrawal zap for LP vault without USDC (e.g., AERO-wstETH Aerodrome LP)
+ * Flow: withdraw LP tokens from vault → remove liquidity → swap both tokens to USDC → transfer all USDC to recipient
+ */
+async function buildLPNonUSDCWithdrawal(
+    vault: Extract<VaultConfig, { type: 'lp-non-usdc' }>,
+    sharesAmount: bigint,
+    recipient: Address,
+    deadline: bigint,
+    needsBridging: boolean
+): Promise<{
+    beefyZapCall: {
+        to: Address;
+        data: `0x${string}`;
+        value: bigint;
+    };
+    beefyOrder: any;
+    beefyRoute: any[];
+}> {
+    // Get USDC address based on network
+    const usdcAddress = vault.network === 'base' ? getUSDCAddressBase() : getUSDCAddressEthereum();
+
+    // Step 1: Withdraw LP tokens from vault
+    const vaultWithdrawData = encodeFunctionData({
+        abi: AERODROME_WITHDRAW_ABI,
+        functionName: 'withdraw',
+        args: [sharesAmount],
+    });
+
+    // Step 2: Get Aerodrome removeLiquidity calldata with offsets
+    const {
+        liquidityOffset: AERODROME_LIQUIDITY_OFFSET,
+        data: aerodromeRemoveLiquidityCalldata,
+    } = locateAerodromeRemoveLiquidityOffsets(vault.tokenA, vault.tokenB, vault.isStable, vault.beefyZapRouter, deadline);
+
+    // Step 3: Swap tokenA to USDC
+    const estimatedTokenAAmount = 1000000000000000000n; // 1 token (18 decimals) - placeholder
+    const kyberSwapA = await kyberEncodeSwap({
+        tokenIn: vault.tokenA,
+        tokenOut: usdcAddress,
+        amountIn: estimatedTokenAAmount,
+        zapRouter: vault.beefyZapRouter,
+        slippageBps: 50,
+        deadlineSec: Number(deadline),
+        clientId: KYBER_CLIENT_ID,
+        chain: vault.kyberChain,
+    });
+
+    // Step 4: Swap tokenB to USDC
+    const estimatedTokenBAmount = 1000000000000000000n; // 1 token (18 decimals) - placeholder
+    const kyberSwapB = await kyberEncodeSwap({
+        tokenIn: vault.tokenB,
+        tokenOut: usdcAddress,
+        amountIn: estimatedTokenBAmount,
+        zapRouter: vault.beefyZapRouter,
+        slippageBps: 50,
+        deadlineSec: Number(deadline),
+        clientId: KYBER_CLIENT_ID,
+        chain: vault.kyberChain,
+    });
+
+    // Build route: withdraw LP → remove liquidity → swap tokenA to USDC → swap tokenB to USDC
+    const route: any[] = [
+        {
+            target: vault.vaultAddress,
+            value: 0n,
+            data: vaultWithdrawData,
+            tokens: [
+                {
+                    token: vault.vaultAddress,
+                    index: -1, // Approve vault shares to the vault (for withdraw)
+                },
+            ],
+        },
+        {
+            target: vault.lpTokenAddress,
+            value: 0n,
+            data: encodeFunctionData({
+                abi: ERC20_ABI,
+                functionName: 'approve',
+                args: [getAerodromeRouterBase(), MaxUint256],
+            }),
+            tokens: [],
+        },
+        {
+            target: getAerodromeRouterBase(),
+            value: 0n,
+            data: aerodromeRemoveLiquidityCalldata,
+            tokens: [
+                {
+                    token: vault.lpTokenAddress,
+                    index: AERODROME_LIQUIDITY_OFFSET, // Replace liquidity parameter with LP token balance
+                },
+            ],
+        },
+        {
+            target: kyberSwapA.routerAddress,
+            value: kyberSwapA.value,
+            data: kyberSwapA.data,
+            tokens: [
+                {
+                    token: vault.tokenA,
+                    index: -1, // Approve tokenA to KyberSwap router (balance after removeLiquidity)
+                },
+            ],
+        },
+        {
+            target: kyberSwapB.routerAddress,
+            value: kyberSwapB.value,
+            data: kyberSwapB.data,
+            tokens: [
+                {
+                    token: vault.tokenB,
+                    index: -1, // Approve tokenB to KyberSwap router (balance after removeLiquidity)
+                },
+            ],
+        },
+    ];
+
+    // Build outputs: USDC (and any dust from tokenA and tokenB)
+    const outputs: any[] = [
+        {
+            token: usdcAddress,
+            minOutputAmount: 0n,
+        },
+        {
+            token: vault.tokenA,
+            minOutputAmount: 0n, // Handle any dust
+        },
+        {
+            token: vault.tokenB,
+            minOutputAmount: 0n, // Handle any dust
+        },
+    ];
+
+    // Step 5: Build CCTP bridge (approval + depositForBurn) if needed
+    if (needsBridging) {
+        // Estimate USDC output (will be refined based on actual amounts)
+        const estimatedUSDC = 1000000n; // 1 USDC (6 decimals) - placeholder
+        const cctpBridge = buildCCTPBridge(estimatedUSDC, recipient, vault.network === 'eth' ? 'ethereum' : 'base');
+
+        route.push(
+            {
+                target: cctpBridge.approvalCall.to,
+                value: cctpBridge.approvalCall.value,
+                data: cctpBridge.approvalCall.data,
+                tokens: [],
+            },
+            {
+                target: cctpBridge.bridgeCall.to,
+                value: cctpBridge.bridgeCall.value,
+                data: cctpBridge.bridgeCall.data,
+                tokens: [
+                    {
+                        token: usdcAddress,
+                        index: -1, // Approve USDC to TokenMessenger for depositForBurn
+                    },
+                ],
+            }
+        );
+    }
+
     const order = {
         inputs: [
             {
@@ -395,45 +786,72 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState, vault
 
         uiState.showStatus(`Vault balance: ${vaultBalance.toString()} shares\nPreparing withdrawal...`, 'info');
 
-        // Estimate output token amount from vault shares
-        const outputTokenAmount = await publicClient.readContract({
-            address: vault.vaultAddress,
-            abi: MORPHO_VAULT_ABI,
-            functionName: 'previewRedeem',
-            args: [vaultBalance]
-        });
-
-        const swapOutputTokenAmount = applySwapSafetyMargin(outputTokenAmount);
-        uiState.showStatus(
-            `Estimated ${vault.outputTokenAddress === '0x09D4214C03D01F49544C0448DBE3A27f768F2b34' ? 'rUSD' : 'output token'}: ${outputTokenAmount.toString()}\n` +
-            `Swap input after ${KYBER_SWAP_MARGIN_BPS.toString()} bps margin: ${swapOutputTokenAmount.toString()}\n` +
-            `Estimating input token output...`,
-            'info'
-        );
-
-        // Estimate input token output from swap
-        const estimatedInputTokenOutput = await estimateKyberSwapOutput({
-            tokenIn: vault.outputTokenAddress,
-            tokenOut: vault.inputTokenAddress,
-            amountIn: swapOutputTokenAmount,
-            clientId: KYBER_CLIENT_ID,
-            chain: vault.kyberChain,
-        });
-
-        uiState.showStatus(`Estimated input token output: ${estimatedInputTokenOutput.toString()}\nBuilding batch...`, 'info');
-
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600 * 2);
 
-        // Build withdrawal batch (withdraw + swap + bridge if needed via Beefy Zap)
-        const withdrawalBatch = await buildWithdrawalBatch(
-            vault,
-            vaultBalance,
-            swapOutputTokenAmount,
-            estimatedInputTokenOutput,
-            uiState.connectedAddress,
-            deadline,
-            needsBridging
-        );
+        // Handle different vault types
+        let withdrawalBatch: {
+            beefyZapCall: {
+                to: Address;
+                data: `0x${string}`;
+                value: bigint;
+            };
+            beefyOrder: any;
+            beefyRoute: any[];
+        };
+
+        if (vault.type === 'single-asset') {
+            // For single-asset vaults, estimate output token amount from vault shares
+            const singleAssetVault = vault as SingleAssetVaultConfig;
+            const outputTokenAmount = await publicClient.readContract({
+                address: vault.vaultAddress,
+                abi: MORPHO_VAULT_ABI,
+                functionName: 'previewRedeem',
+                args: [vaultBalance]
+            });
+
+            const swapOutputTokenAmount = applySwapSafetyMargin(outputTokenAmount);
+            uiState.showStatus(
+                `Estimated ${singleAssetVault.outputTokenAddress === '0x09D4214C03D01F49544C0448DBE3A27f768F2b34' ? 'rUSD' : 'output token'}: ${outputTokenAmount.toString()}\n` +
+                `Swap input after ${KYBER_SWAP_MARGIN_BPS.toString()} bps margin: ${swapOutputTokenAmount.toString()}\n` +
+                `Estimating input token output...`,
+                'info'
+            );
+
+            // Estimate input token output from swap
+            const estimatedInputTokenOutput = await estimateKyberSwapOutput({
+                tokenIn: singleAssetVault.outputTokenAddress,
+                tokenOut: singleAssetVault.inputTokenAddress,
+                amountIn: swapOutputTokenAmount,
+                clientId: KYBER_CLIENT_ID,
+                chain: singleAssetVault.kyberChain,
+            });
+
+            uiState.showStatus(`Estimated input token output: ${estimatedInputTokenOutput.toString()}\nBuilding batch...`, 'info');
+
+            // Build withdrawal batch (withdraw + swap + bridge if needed via Beefy Zap)
+            withdrawalBatch = await buildWithdrawalBatch(
+                vault,
+                vaultBalance,
+                swapOutputTokenAmount,
+                estimatedInputTokenOutput,
+                uiState.connectedAddress,
+                deadline,
+                needsBridging
+            );
+        } else {
+            // For LP vaults, we don't need to estimate swap amounts upfront
+            // The buildLPUSDCWithdrawal/buildLPNonUSDCWithdrawal functions handle it internally
+            uiState.showStatus('Building LP withdrawal batch...', 'info');
+            withdrawalBatch = await buildWithdrawalBatch(
+                vault,
+                vaultBalance,
+                0n, // Not used for LP vaults
+                0n, // Not used for LP vaults
+                uiState.connectedAddress,
+                deadline,
+                needsBridging
+            );
+        }
 
         // Check vault shares approval for Beefy Token Manager
         const tokenManagerAddress = await publicClient.readContract({

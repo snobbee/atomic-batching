@@ -2,7 +2,7 @@ import { type Address } from 'viem';
 import { baseSepolia, base, mainnet, sepolia } from 'viem/chains';
 import { getIsMainnet } from './constants';
 import { Interface } from 'ethers'
-import { AERODROME_ADD_LIQUIDITY_ABI } from './abis'
+import { AERODROME_ADD_LIQUIDITY_ABI, AERODROME_REMOVE_LIQUIDITY_ABI } from './abis'
 
 /**
  * Converts an Ethereum address to bytes32 format (padded with zeros on the left)
@@ -333,6 +333,45 @@ export function locateAerodromeOffsets(
     return {
         amountAOffset: findOffset(SENT_A),
         amountBOffset: findOffset(SENT_B),
+        data: data as `0x${string}`,
+    }
+}
+
+/**
+ * Locate Aerodrome removeLiquidity offsets - similar to locateAerodromeOffsets but for removeLiquidity
+ */
+export function locateAerodromeRemoveLiquidityOffsets(
+    tokenA: Address,
+    tokenB: Address,
+    stable: boolean,
+    to: Address,
+    deadline: bigint
+): { liquidityOffset: number; data: `0x${string}` } {
+    const SENT_LIQUIDITY_STR = '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+    const SENT_LIQUIDITY = BigInt(SENT_LIQUIDITY_STR)
+
+    const iface = new Interface(AERODROME_REMOVE_LIQUIDITY_ABI)
+    const data = iface.encodeFunctionData('removeLiquidity', [
+        tokenA,
+        tokenB,
+        stable,
+        SENT_LIQUIDITY,
+        BigInt(0),
+        BigInt(0),
+        to,
+        deadline,
+    ])
+
+    const hex = data.slice(2)
+    const findOffset = (sentinel: bigint) => {
+        const needle = sentinel.toString(16).padStart(64, '0')
+        const idx = hex.indexOf(needle)
+        if (idx === -1) throw new Error('Sentinel not found in Aerodrome removeLiquidity calldata')
+        return idx / 2
+    }
+
+    return {
+        liquidityOffset: findOffset(SENT_LIQUIDITY),
         data: data as `0x${string}`,
     }
 }
