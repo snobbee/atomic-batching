@@ -1,18 +1,18 @@
 import { type Address, encodeFunctionData } from 'viem';
 import { addressToBytes32 } from './utils';
 import {
-    USDC_ADDRESS_BASE,
-    USDC_ADDRESS_ETHEREUM,
-    CCTP_TOKEN_MESSENGER_BASE,
-    CCTP_TOKEN_MESSENGER_ETHEREUM,
-    CCTP_DOMAIN_ETHEREUM,
-    CCTP_DOMAIN_BASE,
+    getUSDCAddressBase,
+    getUSDCAddressEthereum,
+    getCCTPTokenMessengerBase,
+    getCCTPTokenMessengerEthereum,
+    getCCTPDomainEthereum,
+    getCCTPDomainBase,
 } from './constants';
 import {
     USDC_ABI,
     CCTP_TOKEN_MESSENGER_ABI,
 } from './abis';
-import { MAINNET } from './constants';
+import { getIsMainnet } from './constants';
 
 // UI state interface for bridging functions
 export interface BridgingUIState {
@@ -52,10 +52,10 @@ export function buildCCTPBridge(
     inputAmount: bigint;
 } {
     // Determine source and destination based on 'from' parameter
-    const tokenMessenger = from === 'base' ? CCTP_TOKEN_MESSENGER_BASE : CCTP_TOKEN_MESSENGER_ETHEREUM;
-    const destinationDomain = from === 'base' ? CCTP_DOMAIN_ETHEREUM : CCTP_DOMAIN_BASE;
-    const burnToken = from === 'base' ? USDC_ADDRESS_BASE : USDC_ADDRESS_ETHEREUM;
-    const usdcAddress = from === 'base' ? USDC_ADDRESS_BASE : USDC_ADDRESS_ETHEREUM;
+    const tokenMessenger = from === 'base' ? getCCTPTokenMessengerBase() : getCCTPTokenMessengerEthereum();
+    const destinationDomain = from === 'base' ? getCCTPDomainEthereum() : getCCTPDomainBase();
+    const burnToken = from === 'base' ? getUSDCAddressBase() : getUSDCAddressEthereum();
+    const usdcAddress = from === 'base' ? getUSDCAddressBase() : getUSDCAddressEthereum();
 
     const mintRecipient = addressToBytes32(recipient);
     // destinationCaller: bytes32(0) allows any address to call receiveMessage on destination
@@ -109,7 +109,7 @@ export async function retrieveAttestation(
     maxRetries: number = 60,
     retryDelay: number = 5000
 ): Promise<{ message: `0x${string}`; attestation: `0x${string}` }> {
-    const irisApiBase = MAINNET
+    const irisApiBase = getIsMainnet()
         ? 'https://iris-api.circle.com'
         : 'https://iris-api-sandbox.circle.com';
 

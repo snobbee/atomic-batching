@@ -2,14 +2,12 @@ import { createWalletClient, createPublicClient, custom, type Address, encodeFun
 import { baseSepolia, base, mainnet, sepolia } from 'viem/chains';
 import { switchToEthereum, switchToBase, checkMetaMask } from './utils';
 import {
-    USDC_ADDRESS_ETHEREUM,
-    CCTP_MESSAGE_TRANSMITTER_BASE,
-    CCTP_DOMAIN_ETHEREUM,
+    getCCTPMessageTransmitterBase,
+    getCCTPDomainEthereum,
+    getCCTPDomainBase,
     ZERO_ADDRESS,
-    RUSD_ADDRESS_ETHEREUM,
-    MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM,
-    BEEFY_ZAP_ROUTER_ETHEREUM,
     KYBER_CLIENT_ID,
+    type VaultConfig,
 } from './constants';
 import {
     USDC_ABI,
@@ -18,7 +16,7 @@ import {
     MORPHO_VAULT_ABI,
     BEEFY_ZAP_EXECUTE_ORDER_ABI
 } from './abis';
-import { MAINNET } from './constants';
+import { getIsMainnet } from './constants';
 import { retrieveAttestation, buildCCTPBridge, type BridgingUIState } from './bridging';
 import { kyberEncodeSwap, estimateKyberSwapOutput } from './swap';
 
@@ -42,14 +40,16 @@ const applySwapSafetyMargin = (amount: bigint): bigint => {
 };
 
 /**
- * Builds Ethereum withdrawal batch: Beefy zap (withdraw from vault + swap rUSD to USDC)
+ * Builds withdrawal batch: Beefy zap (withdraw from vault + swap output token to input token + bridge if needed)
  */
-export async function buildEthereumWithdrawalBatch(
+export async function buildWithdrawalBatch(
+    vault: VaultConfig,
     sharesAmount: bigint, // Amount of vault shares to withdraw
-    swapRusdAmount: bigint, // Estimated rUSD amount withdrawn from the vault
-    expectedUsdcOutput: bigint, // Expected USDC amount from swap (for CCTP bridge)
+    swapOutputTokenAmount: bigint, // Estimated output token amount withdrawn from the vault
+    expectedInputTokenOutput: bigint, // Expected input token amount from swap (for CCTP bridge if needed)
     recipient: Address,
-    deadline: bigint
+    deadline: bigint,
+    needsBridging: boolean
 ): Promise<{
     beefyZapCall: {
         to: Address;
@@ -59,77 +59,44 @@ export async function buildEthereumWithdrawalBatch(
     beefyOrder: any;
     beefyRoute: any[];
 }> {
-    // Build Beefy zap: withdraw from vault + swap rUSD to USDC
+    // Build Beefy zap: withdraw from vault + swap output token to input token
 
-    // Step 1: Withdraw/redeem from Morpho vault to get rUSD
-    // IMPORTANT: For Morpho's ERC4626 redeem(shares, receiver, owner):
+    // Step 1: Withdraw/redeem from vault to get output token
+    // IMPORTANT: For ERC4626 redeem(shares, receiver, owner):
     // - shares: The exact amount to redeem (we encode it directly, NOT using index patching)
-    // - receiver: Where the underlying assets (rUSD) go → Beefy Zap Router
+    // - receiver: Where the underlying assets (output token) go → Beefy Zap Router
     // - owner: Who owns the shares being redeemed → Beefy Zap Router (it holds them after TokenManager pulls from user)
     const vaultWithdrawData = encodeFunctionData({
         abi: MORPHO_VAULT_ABI,
         functionName: 'redeem',
         args: [
             sharesAmount,              // Exact shares amount (not 0n!)
-            BEEFY_ZAP_ROUTER_ETHEREUM, // Receiver: router gets the rUSD
-            BEEFY_ZAP_ROUTER_ETHEREUM, // Owner: router holds the shares at execution time
+            vault.beefyZapRouter,     // Receiver: router gets the output token
+            vault.beefyZapRouter,      // Owner: router holds the shares at execution time
         ],
     });
 
-    // Step 2: Swap rUSD to USDC using KyberSwap
-    // Build calldata with the expected rUSD output so Kyber finds the proper route.
+    // Step 2: Swap output token to input token using KyberSwap
+    // Build calldata with the expected output token amount so Kyber finds the proper route.
     const kyberSwap = await kyberEncodeSwap({
-        tokenIn: RUSD_ADDRESS_ETHEREUM,
-        tokenOut: USDC_ADDRESS_ETHEREUM,
-        amountIn: swapRusdAmount,
-        zapRouter: BEEFY_ZAP_ROUTER_ETHEREUM,
+        tokenIn: vault.outputTokenAddress,
+        tokenOut: vault.inputTokenAddress,
+        amountIn: swapOutputTokenAmount,
+        zapRouter: vault.beefyZapRouter,
         slippageBps: 50,
         deadlineSec: Number(deadline),
         clientId: KYBER_CLIENT_ID,
-        chain: 'ethereum',
+        chain: vault.kyberChain,
     });
 
-    // Step 3 & 4: Build CCTP bridge (approval + depositForBurn)
-    const cctpBridge = buildCCTPBridge(expectedUsdcOutput, recipient, 'ethereum');
-
-    // Build Beefy zap order and route
-    // Note: Since USDC is bridged away, we only expect dust/leftover tokens as outputs
-    const order = {
-        inputs: [
-            {
-                token: MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM, // Input: vault shares
-                amount: sharesAmount,
-            },
-        ],
-        outputs: [
-            {
-                // Include rUSD in outputs to handle any dust/leftover from the swap
-                token: RUSD_ADDRESS_ETHEREUM,
-                minOutputAmount: 0n,
-            },
-            {
-                // Include USDC in outputs to handle any dust/leftover after bridging
-                token: USDC_ADDRESS_ETHEREUM,
-                minOutputAmount: 0n,
-            },
-        ],
-        relay: {
-            target: ZERO_ADDRESS,
-            value: 0n,
-            data: '0x' as `0x${string}`,
-        },
-        user: recipient,
-        recipient: recipient,
-    };
-
-    const route = [
+    const route: any[] = [
         {
-            target: MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM,
+            target: vault.vaultAddress,
             value: 0n,
             data: vaultWithdrawData,
             tokens: [
                 {
-                    token: MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM,
+                    token: vault.vaultAddress,
                     index: -1, // Approve vault shares to the vault (for redeem)
                 },
             ],
@@ -140,29 +107,69 @@ export async function buildEthereumWithdrawalBatch(
             data: kyberSwap.data,
             tokens: [
                 {
-                    token: RUSD_ADDRESS_ETHEREUM,
-                    index: -1, // Approve rUSD to KyberSwap router
-                },
-            ],
-        },
-        {
-            target: cctpBridge.approvalCall.to,
-            value: cctpBridge.approvalCall.value,
-            data: cctpBridge.approvalCall.data,
-            tokens: [], // No token approvals needed for USDC approval call
-        },
-        {
-            target: cctpBridge.bridgeCall.to,
-            value: cctpBridge.bridgeCall.value,
-            data: cctpBridge.bridgeCall.data,
-            tokens: [
-                {
-                    token: USDC_ADDRESS_ETHEREUM,
-                    index: -1, // Approve USDC to TokenMessenger for depositForBurn
+                    token: vault.outputTokenAddress,
+                    index: -1, // Approve output token to KyberSwap router
                 },
             ],
         },
     ];
+
+    const outputs: any[] = [
+        {
+            // Include output token in outputs to handle any dust/leftover from the swap
+            token: vault.outputTokenAddress,
+            minOutputAmount: 0n,
+        },
+        {
+            // Include input token in outputs to handle any dust/leftover after bridging (if bridging)
+            token: vault.inputTokenAddress,
+            minOutputAmount: 0n,
+        },
+    ];
+
+    // Step 3 & 4: Build CCTP bridge (approval + depositForBurn) if needed
+    if (needsBridging) {
+        const cctpBridge = buildCCTPBridge(expectedInputTokenOutput, recipient, vault.network === 'eth' ? 'ethereum' : 'base');
+
+        route.push(
+            {
+                target: cctpBridge.approvalCall.to,
+                value: cctpBridge.approvalCall.value,
+                data: cctpBridge.approvalCall.data,
+                tokens: [], // No token approvals needed for USDC approval call
+            },
+            {
+                target: cctpBridge.bridgeCall.to,
+                value: cctpBridge.bridgeCall.value,
+                data: cctpBridge.bridgeCall.data,
+                tokens: [
+                    {
+                        token: vault.inputTokenAddress,
+                        index: -1, // Approve input token to TokenMessenger for depositForBurn
+                    },
+                ],
+            }
+        );
+    }
+
+    // Build Beefy zap order and route
+    // Note: If bridging, input token is bridged away, so we only expect dust/leftover tokens as outputs
+    const order = {
+        inputs: [
+            {
+                token: vault.vaultAddress, // Input: vault shares
+                amount: sharesAmount,
+            },
+        ],
+        outputs,
+        relay: {
+            target: ZERO_ADDRESS,
+            value: 0n,
+            data: '0x' as `0x${string}`,
+        },
+        user: recipient,
+        recipient: recipient,
+    };
 
     const beefyZapData = encodeFunctionData({
         abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
@@ -172,7 +179,7 @@ export async function buildEthereumWithdrawalBatch(
 
     return {
         beefyZapCall: {
-            to: BEEFY_ZAP_ROUTER_ETHEREUM,
+            to: vault.beefyZapRouter,
             data: beefyZapData,
             value: 0n,
         },
@@ -182,7 +189,7 @@ export async function buildEthereumWithdrawalBatch(
 }
 
 /**
- * Runs the Base withdrawal batch: mint USDC on Base after bridging from Ethereum
+ * Runs the Base withdrawal batch: mint USDC on Base after bridging from source network
  */
 export async function runBaseWithdrawalBatch(message: `0x${string}`, attestation: `0x${string}`, uiState: BridgingUIState) {
     if (!uiState.connectedAddress) {
@@ -194,12 +201,12 @@ export async function runBaseWithdrawalBatch(message: `0x${string}`, attestation
     await switchToBase();
 
     const publicClient = createPublicClient({
-        chain: MAINNET ? base : baseSepolia,
+        chain: getIsMainnet() ? base : baseSepolia,
         transport: custom(window.ethereum!)
     });
 
     const walletClient = createWalletClient({
-        chain: MAINNET ? base : baseSepolia,
+        chain: getIsMainnet() ? base : baseSepolia,
         transport: custom(window.ethereum!),
         account: uiState.connectedAddress
     });
@@ -209,7 +216,7 @@ export async function runBaseWithdrawalBatch(message: `0x${string}`, attestation
 
         // Check network
         const chainId = await publicClient.getChainId();
-        const expectedChainId = MAINNET ? base.id : baseSepolia.id;
+        const expectedChainId = getIsMainnet() ? base.id : baseSepolia.id;
         if (chainId !== expectedChainId) {
             uiState.showStatus(
                 `❌ Wrong network! Expected chain ID ${expectedChainId}, but connected to ${chainId}`,
@@ -237,7 +244,7 @@ export async function runBaseWithdrawalBatch(message: `0x${string}`, attestation
         // Prepare batch call: mint
         const calls = [
             {
-                to: CCTP_MESSAGE_TRANSMITTER_BASE,
+                to: getCCTPMessageTransmitterBase(),
                 data: mintData,
                 value: 0n,
             },
@@ -306,9 +313,9 @@ export async function runBaseWithdrawalBatch(message: `0x${string}`, attestation
 }
 
 /**
- * Runs the Ethereum withdrawal batch: withdraw from vault + swap rUSD to USDC + bridge to Base
+ * Runs the withdrawal batch: withdraw from vault + swap output token to input token + bridge (if needed)
  */
-export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
+export async function runEthereumWithdrawalBatch(uiState: BridgingUIState, vault: VaultConfig) {
     if (!uiState.connectedAddress) {
         uiState.showStatus('Please connect your wallet first.', 'error');
         return;
@@ -319,19 +326,30 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
         return;
     }
 
-    // Set flag to prevent page reload during withdrawal process
+    // Set flag to prevent page reload during withdrawal process (if bridging)
     uiState.isCCTPMinting.value = true;
 
-    // Switch to Ethereum
-    await switchToEthereum();
+    // Determine if bridging is needed
+    // If vault is on Ethereum and we want to receive on Base, we need to bridge
+    // If vault is on Base, no bridging needed (we're already on Base)
+    const needsBridging = vault.network === 'eth';
+    const isMainnet = getIsMainnet();
+    const targetChain = vault.network === 'eth' ? (isMainnet ? mainnet : sepolia) : (isMainnet ? base : baseSepolia);
+
+    // Switch to target network
+    if (vault.network === 'eth') {
+        await switchToEthereum();
+    } else {
+        await switchToBase();
+    }
 
     const publicClient = createPublicClient({
-        chain: MAINNET ? mainnet : sepolia,
+        chain: targetChain,
         transport: custom(window.ethereum!)
     });
 
     const walletClient = createWalletClient({
-        chain: MAINNET ? mainnet : sepolia,
+        chain: targetChain,
         transport: custom(window.ethereum!),
         account: uiState.connectedAddress
     });
@@ -348,7 +366,7 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
 
         // Check network
         const chainId = await publicClient.getChainId();
-        const expectedChainId = MAINNET ? mainnet.id : sepolia.id;
+        const expectedChainId = targetChain.id;
         if (chainId !== expectedChainId) {
             uiState.showStatus(
                 `❌ Wrong network! Expected chain ID ${expectedChainId}, but connected to ${chainId}`,
@@ -361,7 +379,7 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
 
         // Check vault balance
         const vaultBalance = await publicClient.readContract({
-            address: MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM,
+            address: vault.vaultAddress,
             abi: MORPHO_VAULT_ABI,
             functionName: 'balanceOf',
             args: [uiState.connectedAddress]
@@ -376,53 +394,55 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
 
         uiState.showStatus(`Vault balance: ${vaultBalance.toString()} shares\nPreparing withdrawal...`, 'info');
 
-        // Estimate rUSD amount from vault shares
-        const rusdAmount = await publicClient.readContract({
-            address: MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM,
+        // Estimate output token amount from vault shares
+        const outputTokenAmount = await publicClient.readContract({
+            address: vault.vaultAddress,
             abi: MORPHO_VAULT_ABI,
             functionName: 'previewRedeem',
             args: [vaultBalance]
         });
 
-        const swapRusdAmount = applySwapSafetyMargin(rusdAmount);
+        const swapOutputTokenAmount = applySwapSafetyMargin(outputTokenAmount);
         uiState.showStatus(
-            `Estimated rUSD: ${rusdAmount.toString()}\n` +
-            `Swap input after ${KYBER_SWAP_MARGIN_BPS.toString()} bps margin: ${swapRusdAmount.toString()}\n` +
-            `Estimating USDC output...`,
+            `Estimated ${vault.outputTokenAddress === '0x09D4214C03D01F49544C0448DBE3A27f768F2b34' ? 'rUSD' : 'output token'}: ${outputTokenAmount.toString()}\n` +
+            `Swap input after ${KYBER_SWAP_MARGIN_BPS.toString()} bps margin: ${swapOutputTokenAmount.toString()}\n` +
+            `Estimating input token output...`,
             'info'
         );
 
-        // Estimate USDC output from swap
-        const estimatedUsdcOutput = await estimateKyberSwapOutput({
-            tokenIn: RUSD_ADDRESS_ETHEREUM,
-            tokenOut: USDC_ADDRESS_ETHEREUM,
-            amountIn: swapRusdAmount,
+        // Estimate input token output from swap
+        const estimatedInputTokenOutput = await estimateKyberSwapOutput({
+            tokenIn: vault.outputTokenAddress,
+            tokenOut: vault.inputTokenAddress,
+            amountIn: swapOutputTokenAmount,
             clientId: KYBER_CLIENT_ID,
-            chain: 'ethereum',
+            chain: vault.kyberChain,
         });
 
-        uiState.showStatus(`Estimated USDC output: ${estimatedUsdcOutput.toString()}\nBuilding batch...`, 'info');
+        uiState.showStatus(`Estimated input token output: ${estimatedInputTokenOutput.toString()}\nBuilding batch...`, 'info');
 
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600 * 2);
 
-        // Build withdrawal batch (withdraw + swap + bridge via Beefy Zap)
-        const withdrawalBatch = await buildEthereumWithdrawalBatch(
+        // Build withdrawal batch (withdraw + swap + bridge if needed via Beefy Zap)
+        const withdrawalBatch = await buildWithdrawalBatch(
+            vault,
             vaultBalance,
-            swapRusdAmount,
-            estimatedUsdcOutput,
+            swapOutputTokenAmount,
+            estimatedInputTokenOutput,
             uiState.connectedAddress,
-            deadline
+            deadline,
+            needsBridging
         );
 
         // Check vault shares approval for Beefy Token Manager
         const tokenManagerAddress = await publicClient.readContract({
-            address: BEEFY_ZAP_ROUTER_ETHEREUM,
+            address: vault.beefyZapRouter,
             abi: BEEFY_ROUTER_MINI_ABI,
             functionName: 'tokenManager'
         }) as Address;
 
         const vaultAllowance = await publicClient.readContract({
-            address: MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM,
+            address: vault.vaultAddress,
             abi: USDC_ABI,
             functionName: 'allowance',
             args: [uiState.connectedAddress, tokenManagerAddress]
@@ -437,7 +457,7 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
                 args: [tokenManagerAddress, vaultBalance]
             });
             approvalCalls.push({
-                to: MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM,
+                to: vault.vaultAddress,
                 data: vaultApprovalData,
                 value: 0n,
             });
@@ -523,22 +543,28 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
         uiState.showStatus(`Withdrawal batch submitted: ${txHash}\nWaiting for confirmation...`, 'info');
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
+        const bridgeText = needsBridging ? 'Tokens have been bridged! Retrieving attestation for mint...' : 'Tokens have been withdrawn!';
         uiState.showStatus(
             `✅ Withdrawal batch confirmed!\n` +
             `Transaction: ${receipt.transactionHash}\n` +
             `Block: ${receipt.blockNumber}\n\n` +
-            `USDC has been bridged to Base! Retrieving attestation for mint...`,
+            bridgeText,
             'success'
         );
 
-        // Retrieve attestation and run Base mint batch
-        const { message, attestation } = await retrieveAttestation(
-            receipt.transactionHash,
-            CCTP_DOMAIN_ETHEREUM
-        );
+        // Retrieve attestation and run Base mint batch (if bridging)
+        if (needsBridging) {
+            const { message, attestation } = await retrieveAttestation(
+                receipt.transactionHash,
+                vault.network === 'eth' ? getCCTPDomainEthereum() : getCCTPDomainBase()
+            );
 
-        uiState.showStatus('Attestation received! Running Base mint batch...', 'info');
-        await runBaseWithdrawalBatch(message, attestation, uiState);
+            uiState.showStatus('Attestation received! Running Base mint batch...', 'info');
+            await runBaseWithdrawalBatch(message, attestation, uiState);
+        } else {
+            // No bridging needed, we're done
+            uiState.isCCTPMinting.value = false;
+        }
 
     } catch (error: any) {
         console.error('Withdrawal error (raw):', error);
@@ -554,17 +580,19 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState) {
         uiState.showStatus(`❌ Error: ${error.message || 'Unknown error'}`, 'error');
     } finally {
         toggleButtons(false);
-        // Switch back to Base network after completion
-        try {
-            uiState.showStatus('Switching back to Base network...', 'info');
-            await switchToBase();
-        } catch (switchError: any) {
-            console.error('Error switching back to Base:', switchError);
-            uiState.showStatus(
-                `⚠️ Could not switch back to Base: ${switchError.message}\n` +
-                `Please switch manually to continue using the app.`,
-                'info'
-            );
+        // Switch back to Base network after completion (if we were on Ethereum)
+        if (vault.network === 'eth') {
+            try {
+                uiState.showStatus('Switching back to Base network...', 'info');
+                await switchToBase();
+            } catch (switchError: any) {
+                console.error('Error switching back to Base:', switchError);
+                uiState.showStatus(
+                    `⚠️ Could not switch back to Base: ${switchError.message}\n` +
+                    `Please switch manually to continue using the app.`,
+                    'info'
+                );
+            }
         }
 
         // Re-enable page reload on network switch after everything is completed

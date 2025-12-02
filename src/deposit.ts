@@ -2,16 +2,13 @@ import { createWalletClient, createPublicClient, custom, type Address, encodeFun
 import { baseSepolia, base, mainnet, sepolia } from 'viem/chains';
 import { switchToEthereum, switchToBase, checkMetaMask } from './utils';
 import {
-    USDC_ADDRESS_BASE,
-    USDC_ADDRESS_ETHEREUM,
-    CCTP_MESSAGE_TRANSMITTER_ETHEREUM,
-    CCTP_DOMAIN_BASE,
+    getUSDCAddressBase,
+    getUSDCAddressEthereum,
+    getCCTPMessageTransmitterEthereum,
+    getCCTPDomainBase,
     ZERO_ADDRESS,
-    RUSD_ADDRESS_ETHEREUM,
-    MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM,
-    AMOUNT,
-    BEEFY_ZAP_ROUTER_ETHEREUM,
     KYBER_CLIENT_ID,
+    type VaultConfig,
 } from './constants';
 import {
     USDC_ABI,
@@ -20,22 +17,23 @@ import {
     MORPHO_VAULT_ABI,
     BEEFY_ZAP_EXECUTE_ORDER_ABI
 } from './abis';
-import { MAINNET } from './constants';
+import { getIsMainnet } from './constants';
 import { buildCCTPBridge, retrieveAttestation, type BridgingUIState } from './bridging';
 import { kyberEncodeSwap } from './swap';
 
 /**
- * Builds Ethereum deposit batch calls: mint USDC + Beefy zap (swap USDC to rUSD + deposit to Morpho vault)
- * Returns call objects for minting and Beefy zap execution
+ * Builds deposit batch calls: mint USDC (if bridging) + Beefy zap (swap + deposit to vault)
+ * Returns call objects for minting (if needed) and Beefy zap execution
  */
-export async function buildEthereumDepositBatch(
+export async function buildDepositBatch(
+    vault: VaultConfig,
     amount: bigint,
     recipient: Address,
-    message: `0x${string}`,
-    attestation: `0x${string}`,
+    message: `0x${string}` | null,
+    attestation: `0x${string}` | null,
     deadline: bigint
 ): Promise<{
-    mintCall: {
+    mintCall?: {
         to: Address;
         data: `0x${string}`;
         value: bigint;
@@ -48,28 +46,36 @@ export async function buildEthereumDepositBatch(
     beefyOrder: any;
     beefyRoute: any[];
 }> {
-    // Mint call: receiveMessage on MessageTransmitterV2
-    const mintData = encodeFunctionData({
-        abi: CCTP_MESSAGE_TRANSMITTER_ABI,
-        functionName: 'receiveMessage',
-        args: [message, attestation],
-    });
+    // Mint call: receiveMessage on MessageTransmitterV2 (only if bridging from Base)
+    let mintCall: { to: Address; data: `0x${string}`; value: bigint } | undefined;
+    if (message && attestation && vault.network === 'eth') {
+        const mintData = encodeFunctionData({
+            abi: CCTP_MESSAGE_TRANSMITTER_ABI,
+            functionName: 'receiveMessage',
+            args: [message, attestation],
+        });
+        mintCall = {
+            to: getCCTPMessageTransmitterEthereum(),
+            data: mintData,
+            value: 0n,
+        };
+    }
 
-    // Build Beefy zap: swap USDC to rUSD and deposit to Morpho vault
-    // Step 1: Swap USDC to rUSD using KyberSwap
+    // Build Beefy zap: swap input token to output token and deposit to vault
+    // Step 1: Swap input token to output token using KyberSwap
     const kyberSwap = await kyberEncodeSwap({
-        tokenIn: USDC_ADDRESS_ETHEREUM,
-        tokenOut: RUSD_ADDRESS_ETHEREUM,
+        tokenIn: vault.inputTokenAddress,
+        tokenOut: vault.outputTokenAddress,
         amountIn: amount,
-        zapRouter: BEEFY_ZAP_ROUTER_ETHEREUM,
+        zapRouter: vault.beefyZapRouter,
         slippageBps: 50,
         deadlineSec: Number(deadline),
         clientId: KYBER_CLIENT_ID,
-        chain: 'ethereum',
+        chain: vault.kyberChain,
     });
 
-    // Step 2: Deposit rUSD to Morpho vault directly (standard ERC4626 deposit)
-    // The vault deposit will use the balance of rUSD after the swap
+    // Step 2: Deposit output token to vault directly (standard ERC4626 deposit)
+    // The vault deposit will use the balance of output token after the swap
     const vaultDepositData = encodeFunctionData({
         abi: MORPHO_VAULT_ABI,
         functionName: 'deposit',
@@ -80,13 +86,13 @@ export async function buildEthereumDepositBatch(
     const order = {
         inputs: [
             {
-                token: USDC_ADDRESS_ETHEREUM,
+                token: vault.inputTokenAddress,
                 amount: amount,
             },
         ],
         outputs: [
             {
-                token: MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM,
+                token: vault.vaultAddress,
                 minOutputAmount: 0n, // Accept any amount of vault shares
             },
         ],
@@ -106,19 +112,19 @@ export async function buildEthereumDepositBatch(
             data: kyberSwap.data,
             tokens: [
                 {
-                    token: USDC_ADDRESS_ETHEREUM,
-                    index: -1, // Approve USDC, use order input amount (don't replace calldata)
+                    token: vault.inputTokenAddress,
+                    index: -1, // Approve input token, use order input amount (don't replace calldata)
                 },
             ],
         },
         {
-            target: MORPHO_STEAKHOUSE_RUSD_VAULT_ETHEREUM, // Use vault directly
+            target: vault.vaultAddress, // Use vault directly
             value: 0n,
             data: vaultDepositData,
             tokens: [
                 {
-                    token: RUSD_ADDRESS_ETHEREUM,
-                    index: 4, // Replace first parameter (assets) with rUSD balance (offset 4 = after 4-byte function selector)
+                    token: vault.outputTokenAddress,
+                    index: 4, // Replace first parameter (assets) with output token balance (offset 4 = after 4-byte function selector)
                 },
             ],
         },
@@ -131,13 +137,9 @@ export async function buildEthereumDepositBatch(
     });
 
     return {
-        mintCall: {
-            to: CCTP_MESSAGE_TRANSMITTER_ETHEREUM,
-            data: mintData,
-            value: 0n,
-        },
+        mintCall,
         beefyZapCall: {
-            to: BEEFY_ZAP_ROUTER_ETHEREUM,
+            to: vault.beefyZapRouter,
             data: beefyZapData,
             value: 0n,
         },
@@ -147,9 +149,9 @@ export async function buildEthereumDepositBatch(
 }
 
 /**
- * Runs the Base deposit batch: approve USDC + bridge to Ethereum
+ * Runs the deposit batch: approve + bridge (if needed) + swap + deposit
  */
-export async function runBaseDepositBatch(uiState: BridgingUIState) {
+export async function runBaseDepositBatch(uiState: BridgingUIState, vault: VaultConfig, amount: bigint) {
     if (!uiState.connectedAddress) {
         uiState.showStatus('Please connect your wallet first.', 'error');
         return;
@@ -160,16 +162,24 @@ export async function runBaseDepositBatch(uiState: BridgingUIState) {
         return;
     }
 
-    // Set flag to prevent page reload during entire bridging process (Base + Ethereum)
+    // Set flag to prevent page reload during entire bridging process (if bridging)
     uiState.isCCTPMinting.value = true;
 
+    // Determine source chain based on vault network
+    // If vault is on Ethereum, we need to bridge from Base
+    // If vault is on Base, we can deposit directly
+    const needsBridging = vault.network === 'eth';
+    const isMainnet = getIsMainnet();
+    const sourceChain = needsBridging ? (isMainnet ? base : baseSepolia) : (isMainnet ? base : baseSepolia);
+    const sourceUSDC = needsBridging ? getUSDCAddressBase() : (vault.network === 'base' ? getUSDCAddressBase() : getUSDCAddressEthereum());
+
     const publicClient = createPublicClient({
-        chain: MAINNET ? base : baseSepolia,
+        chain: sourceChain,
         transport: custom(window.ethereum!)
     });
 
     const walletClient = createWalletClient({
-        chain: MAINNET ? base : baseSepolia,
+        chain: sourceChain,
         transport: custom(window.ethereum!),
         account: uiState.connectedAddress
     });
@@ -182,11 +192,16 @@ export async function runBaseDepositBatch(uiState: BridgingUIState) {
 
     try {
         toggleButtons(true);
-        uiState.showStatus('Preparing Base batch transaction (approve + bridge)...', 'info');
+
+        if (needsBridging) {
+            uiState.showStatus('Preparing Base batch transaction (approve + bridge)...', 'info');
+        } else {
+            uiState.showStatus('Preparing deposit batch transaction...', 'info');
+        }
 
         // Check network
         const chainId = await publicClient.getChainId();
-        const expectedChainId = MAINNET ? base.id : baseSepolia.id;
+        const expectedChainId = sourceChain.id;
         if (chainId !== expectedChainId) {
             uiState.showStatus(
                 `❌ Wrong network! Expected chain ID ${expectedChainId}, but connected to ${chainId}`,
@@ -198,120 +213,131 @@ export async function runBaseDepositBatch(uiState: BridgingUIState) {
 
         // Check balance
         const balance = await publicClient.readContract({
-            address: USDC_ADDRESS_BASE,
+            address: sourceUSDC,
             abi: USDC_ABI,
             functionName: 'balanceOf',
             args: [uiState.connectedAddress]
         });
-        if (balance < AMOUNT) {
+        if (balance < amount) {
             uiState.showStatus(
-                `❌ Insufficient balance. Need ${AMOUNT.toString()} but only have ${balance.toString()}`,
+                `❌ Insufficient balance. Need ${amount.toString()} but only have ${balance.toString()}`,
                 'error'
             );
             toggleButtons(false);
             return;
         }
 
-        // Build CCTP bridge calls
-        const cctpBridge = buildCCTPBridge(AMOUNT, uiState.connectedAddress);
+        let message: `0x${string}` | null = null;
+        let attestation: `0x${string}` | null = null;
 
-        // Check EIP-5792 support
-        uiState.showStatus('Checking EIP-5792 capabilities...', 'info');
-        const capabilities = await walletClient.getCapabilities();
-        const chainIdStr = String(chainId);
-        const chainCapabilities = (capabilities as any)?.[chainIdStr];
-        if (!capabilities || !chainCapabilities || !chainCapabilities.atomic) {
-            uiState.showStatus('❌ EIP-5792 atomic batching not supported', 'error');
-            toggleButtons(false);
-            return;
-        }
+        if (needsBridging) {
+            // Build CCTP bridge calls
+            const cctpBridge = buildCCTPBridge(amount, uiState.connectedAddress, 'base');
 
-        // Prepare batch calls
-        const calls = [
-            {
-                to: cctpBridge.approvalCall.to as `0x${string}`,
-                data: cctpBridge.approvalCall.data,
-                value: cctpBridge.approvalCall.value,
-            },
-            {
-                to: cctpBridge.bridgeCall.to as `0x${string}`,
-                data: cctpBridge.bridgeCall.data,
-                value: cctpBridge.bridgeCall.value,
-            },
-        ];
+            // Check EIP-5792 support
+            uiState.showStatus('Checking EIP-5792 capabilities...', 'info');
+            const capabilities = await walletClient.getCapabilities();
+            const chainIdStr = String(chainId);
+            const chainCapabilities = (capabilities as any)?.[chainIdStr];
+            if (!capabilities || !chainCapabilities || !chainCapabilities.atomic) {
+                uiState.showStatus('❌ EIP-5792 atomic batching not supported', 'error');
+                toggleButtons(false);
+                return;
+            }
 
-        uiState.showStatus('Submitting Base batch transaction (approve + bridge)...', 'info');
+            // Prepare batch calls
+            const calls = [
+                {
+                    to: cctpBridge.approvalCall.to as `0x${string}`,
+                    data: cctpBridge.approvalCall.data,
+                    value: cctpBridge.approvalCall.value,
+                },
+                {
+                    to: cctpBridge.bridgeCall.to as `0x${string}`,
+                    data: cctpBridge.bridgeCall.data,
+                    value: cctpBridge.bridgeCall.value,
+                },
+            ];
 
-        const result = await walletClient.sendCalls({
-            account: uiState.connectedAddress,
-            calls,
-        });
+            uiState.showStatus('Submitting Base batch transaction (approve + bridge)...', 'info');
 
-        // Wait for transaction
-        let txHash: `0x${string}` | undefined;
-        if (String(result.id).startsWith('0x') && String(result.id).length === 66) {
-            txHash = result.id as `0x${string}`;
-        } else {
-            // Poll for transaction hash
-            uiState.showStatus('Waiting for transaction hash...', 'info');
-            const maxRetries = 60;
-            const retryDelay = 2000; // 2 seconds
+            const result = await walletClient.sendCalls({
+                account: uiState.connectedAddress,
+                calls,
+            });
 
-            for (let attempt = 0; attempt < maxRetries; attempt++) {
-                const status = await walletClient.getCallsStatus({ id: result.id });
+            // Wait for transaction
+            let txHash: `0x${string}` | undefined;
+            if (String(result.id).startsWith('0x') && String(result.id).length === 66) {
+                txHash = result.id as `0x${string}`;
+            } else {
+                // Poll for transaction hash
+                uiState.showStatus('Waiting for transaction hash...', 'info');
+                const maxRetries = 60;
+                const retryDelay = 2000; // 2 seconds
 
-                // Check if status indicates the calls are successful
-                if (status.status === 'success') {
+                for (let attempt = 0; attempt < maxRetries; attempt++) {
+                    const status = await walletClient.getCallsStatus({ id: result.id });
+
+                    // Check if status indicates the calls are successful
+                    if (status.status === 'success') {
+                        if (status.receipts && status.receipts.length > 0) {
+                            txHash = status.receipts[0].transactionHash;
+                            break;
+                        }
+                    }
+
+                    // Also check if receipts are available regardless of status
                     if (status.receipts && status.receipts.length > 0) {
                         txHash = status.receipts[0].transactionHash;
                         break;
                     }
-                }
 
-                // Also check if receipts are available regardless of status
-                if (status.receipts && status.receipts.length > 0) {
-                    txHash = status.receipts[0].transactionHash;
-                    break;
-                }
-
-                // If still pending, wait and retry
-                if (attempt < maxRetries - 1) {
-                    await new Promise(resolve => setTimeout(resolve, retryDelay));
-                } else {
-                    throw new Error(`No receipts found in calls status after ${maxRetries} attempts. Status: ${JSON.stringify(status)}`);
+                    // If still pending, wait and retry
+                    if (attempt < maxRetries - 1) {
+                        await new Promise(resolve => setTimeout(resolve, retryDelay));
+                    } else {
+                        throw new Error(`No receipts found in calls status after ${maxRetries} attempts. Status: ${JSON.stringify(status)}`);
+                    }
                 }
             }
+
+            if (!txHash) {
+                throw new Error('No transaction hash found after polling');
+            }
+
+            uiState.showStatus(`Base batch submitted: ${txHash}\nWaiting for confirmation...`, 'info');
+            const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+            uiState.showStatus(
+                `✅ Base batch confirmed!\n` +
+                `Transaction: ${receipt.transactionHash}\n` +
+                `Block: ${receipt.blockNumber}\n\n` +
+                `Retrieving attestation for Ethereum mint...`,
+                'success'
+            );
+
+            // Retrieve attestation and run Ethereum batch
+            const attestationData = await retrieveAttestation(
+                receipt.transactionHash,
+                getCCTPDomainBase()
+            );
+            message = attestationData.message;
+            attestation = attestationData.attestation;
         }
 
-        if (!txHash) {
-            throw new Error('No transaction hash found after polling');
+        // Run deposit batch on target network
+        if (needsBridging) {
+            uiState.showStatus('Attestation received! Running Ethereum deposit batch...', 'info');
+            await runDepositBatch(vault, amount, message, attestation, uiState);
+        } else {
+            // Direct deposit on Base (no bridging needed)
+            await runDepositBatch(vault, amount, null, null, uiState);
         }
-
-        uiState.showStatus(`Base batch submitted: ${txHash}\nWaiting for confirmation...`, 'info');
-        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-
-        uiState.showStatus(
-            `✅ Base batch confirmed!\n` +
-            `Transaction: ${receipt.transactionHash}\n` +
-            `Block: ${receipt.blockNumber}\n\n` +
-            `Retrieving attestation for Ethereum mint...`,
-            'success'
-        );
-
-        // Retrieve attestation and run Ethereum batch
-        const { message, attestation } = await retrieveAttestation(
-            receipt.transactionHash,
-            CCTP_DOMAIN_BASE
-        );
-
-        uiState.showStatus('Attestation received! Running Ethereum deposit batch...', 'info');
-        await runEthereumDepositBatch(message, attestation, uiState);
 
     } catch (error: any) {
-        console.error('Base batch error:', error);
+        console.error('Deposit batch error:', error);
         uiState.showStatus(`❌ Error: ${error.message || 'Unknown error'}`, 'error');
-        // Reset flag on error (if runEthereumDepositBatch wasn't called yet)
-        // runEthereumDepositBatch's finally block will handle resetting it in the normal flow
         uiState.isCCTPMinting.value = false;
     } finally {
         toggleButtons(false);
@@ -319,10 +345,10 @@ export async function runBaseDepositBatch(uiState: BridgingUIState) {
 }
 
 /**
- * Test function: Runs only the Ethereum deposit batch (swap + deposit) without bridging
- * This allows testing the Ethereum deposit batch logic without waiting for CCTP bridging
+ * Test function: Runs only the deposit batch (swap + deposit) without bridging
+ * This allows testing the deposit batch logic without waiting for CCTP bridging
  */
-export async function testEthereumDepositBatchOnly(uiState: BridgingUIState) {
+export async function testEthereumDepositBatchOnly(uiState: BridgingUIState, vault: VaultConfig, amount: bigint) {
     if (!uiState.connectedAddress) {
         uiState.showStatus('Please connect your wallet first.', 'error');
         return;
@@ -336,26 +362,32 @@ export async function testEthereumDepositBatchOnly(uiState: BridgingUIState) {
     // Set flag to prevent page reload during testing
     uiState.isCCTPMinting.value = true;
 
-    // Switch to Ethereum
-    await switchToEthereum();
+    // Switch to target network
+    const isMainnet = getIsMainnet();
+    const targetChain = vault.network === 'eth' ? (isMainnet ? mainnet : sepolia) : (isMainnet ? base : baseSepolia);
+    if (vault.network === 'eth') {
+        await switchToEthereum();
+    } else {
+        await switchToBase();
+    }
 
     const publicClient = createPublicClient({
-        chain: MAINNET ? mainnet : sepolia,
+        chain: targetChain,
         transport: custom(window.ethereum!)
     });
 
     const walletClient = createWalletClient({
-        chain: MAINNET ? mainnet : sepolia,
+        chain: targetChain,
         transport: custom(window.ethereum!),
         account: uiState.connectedAddress
     });
 
     try {
-        uiState.showStatus('🧪 Testing Ethereum batch (Beefy zap only, no bridging)...', 'info');
+        uiState.showStatus(`🧪 Testing ${vault.network === 'eth' ? 'Ethereum' : 'Base'} batch (Beefy zap only, no bridging)...`, 'info');
 
         // Check network
         const chainId = await publicClient.getChainId();
-        const expectedChainId = MAINNET ? mainnet.id : sepolia.id;
+        const expectedChainId = targetChain.id;
         if (chainId !== expectedChainId) {
             uiState.showStatus(
                 `❌ Wrong network! Expected chain ID ${expectedChainId}, but connected to ${chainId}`,
@@ -365,18 +397,18 @@ export async function testEthereumDepositBatchOnly(uiState: BridgingUIState) {
             return;
         }
 
-        // Check USDC balance on Ethereum
+        // Check input token balance
         const balance = await publicClient.readContract({
-            address: USDC_ADDRESS_ETHEREUM,
+            address: vault.inputTokenAddress,
             abi: USDC_ABI,
             functionName: 'balanceOf',
             args: [uiState.connectedAddress]
         });
 
-        if (balance < AMOUNT) {
+        if (balance < amount) {
             uiState.showStatus(
-                `❌ Insufficient USDC balance on Ethereum. Need ${AMOUNT.toString()} but only have ${balance.toString()}\n` +
-                `Please ensure you have USDC on Ethereum to test the batch.`,
+                `❌ Insufficient balance. Need ${amount.toString()} but only have ${balance.toString()}\n` +
+                `Please ensure you have sufficient ${vault.inputTokenAddress === getUSDCAddressEthereum() ? 'USDC on Ethereum' : 'USDC on Base'} to test the batch.`,
                 'error'
             );
             uiState.isCCTPMinting.value = false;
@@ -386,20 +418,17 @@ export async function testEthereumDepositBatchOnly(uiState: BridgingUIState) {
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600 * 2);
 
         // Build only the Beefy zap part (no mint)
-        // Use dummy message/attestation since we're skipping the mint
-        const dummyMessage = '0x' as `0x${string}`;
-        const dummyAttestation = '0x' as `0x${string}`;
-        const ethereumBatch = await buildEthereumDepositBatch(AMOUNT, uiState.connectedAddress, dummyMessage, dummyAttestation, deadline);
+        const depositBatch = await buildDepositBatch(vault, amount, uiState.connectedAddress, null, null, deadline);
 
-        // Check USDC approval for Beefy Token Manager
+        // Check input token approval for Beefy Token Manager
         const tokenManagerAddress = await publicClient.readContract({
-            address: BEEFY_ZAP_ROUTER_ETHEREUM,
+            address: vault.beefyZapRouter,
             abi: BEEFY_ROUTER_MINI_ABI,
             functionName: 'tokenManager'
         }) as Address;
 
-        const usdcAllowance = await publicClient.readContract({
-            address: USDC_ADDRESS_ETHEREUM,
+        const tokenAllowance = await publicClient.readContract({
+            address: vault.inputTokenAddress,
             abi: USDC_ABI,
             functionName: 'allowance',
             args: [uiState.connectedAddress, tokenManagerAddress]
@@ -407,14 +436,14 @@ export async function testEthereumDepositBatchOnly(uiState: BridgingUIState) {
 
         // Build approval call if needed
         const approvalCalls = [];
-        if (usdcAllowance < AMOUNT) {
+        if (tokenAllowance < amount) {
             const approvalData = encodeFunctionData({
                 abi: USDC_ABI,
                 functionName: 'approve',
-                args: [tokenManagerAddress, AMOUNT]
+                args: [tokenManagerAddress, amount]
             });
             approvalCalls.push({
-                to: USDC_ADDRESS_ETHEREUM,
+                to: vault.inputTokenAddress,
                 data: approvalData,
                 value: 0n,
             });
@@ -438,13 +467,13 @@ export async function testEthereumDepositBatchOnly(uiState: BridgingUIState) {
                 value: call.value,
             })),
             {
-                to: ethereumBatch.beefyZapCall.to as `0x${string}`,
-                data: ethereumBatch.beefyZapCall.data,
-                value: ethereumBatch.beefyZapCall.value,
+                to: depositBatch.beefyZapCall.to as `0x${string}`,
+                data: depositBatch.beefyZapCall.data,
+                value: depositBatch.beefyZapCall.value,
             },
         ];
 
-        uiState.showStatus('Submitting Ethereum test batch (Beefy zap only)...', 'info');
+        uiState.showStatus(`Submitting ${vault.network === 'eth' ? 'Ethereum' : 'Base'} test batch (Beefy zap only)...`, 'info');
 
         const result = await walletClient.sendCalls({
             account: uiState.connectedAddress,
@@ -491,14 +520,14 @@ export async function testEthereumDepositBatchOnly(uiState: BridgingUIState) {
             throw new Error('No transaction hash found after polling');
         }
 
-        uiState.showStatus(`Ethereum test batch submitted: ${txHash}\nWaiting for confirmation...`, 'info');
+        uiState.showStatus(`${vault.network === 'eth' ? 'Ethereum' : 'Base'} test batch submitted: ${txHash}\nWaiting for confirmation...`, 'info');
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
         uiState.showStatus(
-            `✅ Ethereum test batch confirmed!\n` +
+            `✅ ${vault.network === 'eth' ? 'Ethereum' : 'Base'} test batch confirmed!\n` +
             `Transaction: ${receipt.transactionHash}\n` +
             `Block: ${receipt.blockNumber}\n\n` +
-            `USDC has been swapped to rUSD and deposited to Morpho vault!`,
+            `Tokens have been swapped and deposited to ${vault.name}!`,
             'success'
         );
 
@@ -506,17 +535,19 @@ export async function testEthereumDepositBatchOnly(uiState: BridgingUIState) {
         console.error('Ethereum test batch error:', error);
         uiState.showStatus(`❌ Error: ${error.message || 'Unknown error'}`, 'error');
     } finally {
-        // Switch back to Base network after completion
-        try {
-            uiState.showStatus('Switching back to Base network...', 'info');
-            await switchToBase();
-        } catch (switchError: any) {
-            console.error('Error switching back to Base:', switchError);
-            uiState.showStatus(
-                `⚠️ Could not switch back to Base: ${switchError.message}\n` +
-                `Please switch manually to continue using the app.`,
-                'info'
-            );
+        // Switch back to Base network after completion (if we were on Ethereum)
+        if (vault.network === 'eth') {
+            try {
+                uiState.showStatus('Switching back to Base network...', 'info');
+                await switchToBase();
+            } catch (switchError: any) {
+                console.error('Error switching back to Base:', switchError);
+                uiState.showStatus(
+                    `⚠️ Could not switch back to Base: ${switchError.message}\n` +
+                    `Please switch manually to continue using the app.`,
+                    'info'
+                );
+            }
         }
 
         // Re-enable page reload on network switch after everything is completed
@@ -528,49 +559,64 @@ export async function testEthereumDepositBatchOnly(uiState: BridgingUIState) {
 }
 
 /**
- * Runs the Ethereum deposit batch: mint USDC + Beefy zap (swap USDC to rUSD + deposit to Morpho vault)
+ * Runs the deposit batch: mint USDC (if bridging) + Beefy zap (swap + deposit to vault)
  */
-export async function runEthereumDepositBatch(message: `0x${string}`, attestation: `0x${string}`, uiState: BridgingUIState) {
+export async function runDepositBatch(
+    vault: VaultConfig,
+    amount: bigint,
+    message: `0x${string}` | null,
+    attestation: `0x${string}` | null,
+    uiState: BridgingUIState
+) {
     if (!uiState.connectedAddress) {
         uiState.showStatus('Please connect your wallet first.', 'error');
         return;
     }
 
-    // Set flag to prevent page reload during CCTP minting
-    uiState.isCCTPMinting.value = true;
+    // Set flag to prevent page reload during CCTP minting (if bridging)
+    if (message && attestation) {
+        uiState.isCCTPMinting.value = true;
+    }
 
-    // Switch to Ethereum
-    await switchToEthereum();
+    // Switch to target network
+    const isMainnet = getIsMainnet();
+    const targetChain = vault.network === 'eth' ? (isMainnet ? mainnet : sepolia) : (isMainnet ? base : baseSepolia);
+    if (vault.network === 'eth') {
+        await switchToEthereum();
+    } else {
+        await switchToBase();
+    }
 
     const publicClient = createPublicClient({
-        chain: MAINNET ? mainnet : sepolia,
+        chain: targetChain,
         transport: custom(window.ethereum!)
     });
 
     const walletClient = createWalletClient({
-        chain: MAINNET ? mainnet : sepolia,
+        chain: targetChain,
         transport: custom(window.ethereum!),
         account: uiState.connectedAddress
     });
 
     try {
-        uiState.showStatus('Preparing Ethereum batch transaction (mint + swap + deposit)...', 'info');
+        const actionText = message && attestation ? 'mint + swap + deposit' : 'swap + deposit';
+        uiState.showStatus(`Preparing ${vault.network === 'eth' ? 'Ethereum' : 'Base'} batch transaction (${actionText})...`, 'info');
 
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600 * 2);
 
-        // Build Ethereum batch
-        const ethereumBatch = await buildEthereumDepositBatch(AMOUNT, uiState.connectedAddress, message, attestation, deadline);
+        // Build deposit batch
+        const depositBatch = await buildDepositBatch(vault, amount, uiState.connectedAddress, message, attestation, deadline);
 
         // Check approvals
-        // 1. Check USDC approval for Beefy Token Manager
+        // 1. Check input token approval for Beefy Token Manager
         const tokenManagerAddress = await publicClient.readContract({
-            address: BEEFY_ZAP_ROUTER_ETHEREUM,
+            address: vault.beefyZapRouter,
             abi: BEEFY_ROUTER_MINI_ABI,
             functionName: 'tokenManager'
         }) as Address;
 
-        const usdcAllowance = await publicClient.readContract({
-            address: USDC_ADDRESS_ETHEREUM,
+        const tokenAllowance = await publicClient.readContract({
+            address: vault.inputTokenAddress,
             abi: USDC_ABI,
             functionName: 'allowance',
             args: [uiState.connectedAddress, tokenManagerAddress]
@@ -578,14 +624,14 @@ export async function runEthereumDepositBatch(message: `0x${string}`, attestatio
 
         // Build approval call if needed
         const approvalCalls = [];
-        if (usdcAllowance < AMOUNT) {
+        if (tokenAllowance < amount) {
             const approvalData = encodeFunctionData({
                 abi: USDC_ABI,
                 functionName: 'approve',
-                args: [tokenManagerAddress, AMOUNT]
+                args: [tokenManagerAddress, amount]
             });
             approvalCalls.push({
-                to: USDC_ADDRESS_ETHEREUM,
+                to: vault.inputTokenAddress,
                 data: approvalData,
                 value: 0n,
             });
@@ -601,26 +647,26 @@ export async function runEthereumDepositBatch(message: `0x${string}`, attestatio
             return;
         }
 
-        // Prepare batch calls: mint + approval (if needed) + Beefy zap
+        // Prepare batch calls: mint (if bridging) + approval (if needed) + Beefy zap
         const calls = [
-            {
-                to: ethereumBatch.mintCall.to as `0x${string}`,
-                data: ethereumBatch.mintCall.data,
-                value: ethereumBatch.mintCall.value,
-            },
+            ...(depositBatch.mintCall ? [{
+                to: depositBatch.mintCall.to as `0x${string}`,
+                data: depositBatch.mintCall.data,
+                value: depositBatch.mintCall.value,
+            }] : []),
             ...approvalCalls.map(call => ({
                 to: call.to as `0x${string}`,
                 data: call.data,
                 value: call.value,
             })),
             {
-                to: ethereumBatch.beefyZapCall.to as `0x${string}`,
-                data: ethereumBatch.beefyZapCall.data,
-                value: ethereumBatch.beefyZapCall.value,
+                to: depositBatch.beefyZapCall.to as `0x${string}`,
+                data: depositBatch.beefyZapCall.data,
+                value: depositBatch.beefyZapCall.value,
             },
         ];
 
-        uiState.showStatus('Submitting Ethereum batch transaction...', 'info');
+        uiState.showStatus(`Submitting ${vault.network === 'eth' ? 'Ethereum' : 'Base'} batch transaction...`, 'info');
 
         const result = await walletClient.sendCalls({
             account: uiState.connectedAddress,
@@ -667,32 +713,35 @@ export async function runEthereumDepositBatch(message: `0x${string}`, attestatio
             throw new Error('No transaction hash found after polling');
         }
 
-        uiState.showStatus(`Ethereum batch submitted: ${txHash}\nWaiting for confirmation...`, 'info');
+        uiState.showStatus(`${vault.network === 'eth' ? 'Ethereum' : 'Base'} batch submitted: ${txHash}\nWaiting for confirmation...`, 'info');
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
+        const bridgeText = message && attestation ? 'bridged, ' : '';
         uiState.showStatus(
-            `✅ Ethereum batch confirmed!\n` +
+            `✅ ${vault.network === 'eth' ? 'Ethereum' : 'Base'} batch confirmed!\n` +
             `Transaction: ${receipt.transactionHash}\n` +
             `Block: ${receipt.blockNumber}\n\n` +
-            `USDC has been bridged, swapped to rUSD, and deposited to Morpho vault!`,
+            `Tokens have been ${bridgeText}swapped and deposited to ${vault.name}!`,
             'success'
         );
 
     } catch (error: any) {
-        console.error('Ethereum batch error:', error);
+        console.error('Deposit batch error:', error);
         uiState.showStatus(`❌ Error: ${error.message || 'Unknown error'}`, 'error');
     } finally {
-        // Switch back to Base network after completion
-        try {
-            uiState.showStatus('Switching back to Base network...', 'info');
-            await switchToBase();
-        } catch (switchError: any) {
-            console.error('Error switching back to Base:', switchError);
-            uiState.showStatus(
-                `⚠️ Could not switch back to Base: ${switchError.message}\n` +
-                `Please switch manually to continue using the app.`,
-                'info'
-            );
+        // Switch back to Base network after completion (if we were on Ethereum)
+        if (vault.network === 'eth') {
+            try {
+                uiState.showStatus('Switching back to Base network...', 'info');
+                await switchToBase();
+            } catch (switchError: any) {
+                console.error('Error switching back to Base:', switchError);
+                uiState.showStatus(
+                    `⚠️ Could not switch back to Base: ${switchError.message}\n` +
+                    `Please switch manually to continue using the app.`,
+                    'info'
+                );
+            }
         }
 
         // Re-enable page reload on network switch after everything is completed

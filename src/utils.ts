@@ -1,6 +1,6 @@
 import { type Address } from 'viem';
 import { baseSepolia, base, mainnet, sepolia } from 'viem/chains';
-import { MAINNET } from './constants';
+import { getIsMainnet } from './constants';
 
 /**
  * Converts an Ethereum address to bytes32 format (padded with zeros on the left)
@@ -17,7 +17,8 @@ export function addressToBytes32(address: Address): `0x${string}` {
  * Switches the wallet to Ethereum network
  */
 export async function switchToEthereum(): Promise<void> {
-    const ethereumChainId = MAINNET ? mainnet.id : sepolia.id;
+    const isMainnet = getIsMainnet();
+    const ethereumChainId = isMainnet ? mainnet.id : sepolia.id;
 
     try {
         await window.ethereum?.request({
@@ -27,7 +28,7 @@ export async function switchToEthereum(): Promise<void> {
     } catch (switchError: any) {
         // If the chain doesn't exist, try to add it
         if (switchError.code === 4902) {
-            const chainParams = MAINNET ? {
+            const chainParams = isMainnet ? {
                 chainId: `0x${mainnet.id.toString(16)}`,
                 chainName: 'Ethereum Mainnet',
                 nativeCurrency: {
@@ -63,7 +64,8 @@ export async function switchToEthereum(): Promise<void> {
  * Switches the wallet back to Base network
  */
 export async function switchToBase(): Promise<void> {
-    const baseChainId = MAINNET ? base.id : baseSepolia.id;
+    const isMainnet = getIsMainnet();
+    const baseChainId = isMainnet ? base.id : baseSepolia.id;
 
     try {
         await window.ethereum?.request({
@@ -73,7 +75,7 @@ export async function switchToBase(): Promise<void> {
     } catch (switchError: any) {
         // If the chain doesn't exist, try to add it
         if (switchError.code === 4902) {
-            const chainParams = MAINNET ? {
+            const chainParams = isMainnet ? {
                 chainId: `0x${base.id.toString(16)}`,
                 chainName: 'Base',
                 nativeCurrency: {
@@ -113,11 +115,85 @@ export function checkMetaMask(): boolean {
     return true;
 }
 
-// Helper function to show status messages
+// Status history type
+export type StatusEntry = {
+    message: string;
+    type: 'success' | 'error' | 'info';
+    timestamp: Date;
+};
+
+// Helper function to format timestamp
+function formatTimestamp(date: Date): string {
+    return date.toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true
+    });
+}
+
+// Maximum number of status entries to keep (to prevent memory issues)
+const MAX_STATUS_HISTORY = 100;
+
+// Helper function to show status messages (adds to history)
 export function showStatus(message: string, type: 'success' | 'error' | 'info', statusDiv: HTMLDivElement) {
-    statusDiv.textContent = message;
-    statusDiv.className = `status ${type}`;
+    // Show the status section if it's hidden
+    const statusSection = statusDiv.closest('#statusSection') as HTMLDivElement;
+    if (statusSection) {
+        statusSection.style.display = 'block';
+    }
+
+    // Create status entry
+    const entry: StatusEntry = {
+        message,
+        type,
+        timestamp: new Date()
+    };
+
+    // Create status item element
+    const statusItem = document.createElement('div');
+    statusItem.className = `status-item ${type}`;
+
+    const messageDiv = document.createElement('div');
+    messageDiv.className = 'status-message';
+    messageDiv.textContent = message;
+
+    const timestampDiv = document.createElement('div');
+    timestampDiv.className = 'status-timestamp';
+    timestampDiv.textContent = formatTimestamp(entry.timestamp);
+
+    statusItem.appendChild(messageDiv);
+    statusItem.appendChild(timestampDiv);
+
+    // Insert at the top (most recent first)
+    if (statusDiv.firstChild) {
+        statusDiv.insertBefore(statusItem, statusDiv.firstChild);
+    } else {
+        statusDiv.appendChild(statusItem);
+    }
+
+    // Limit the number of status entries
+    while (statusDiv.children.length > MAX_STATUS_HISTORY) {
+        statusDiv.removeChild(statusDiv.lastChild!);
+    }
+
+    // Show container if it was hidden
     statusDiv.style.display = 'block';
+
+    // Auto-scroll to top to show newest message
+    statusDiv.scrollTop = 0;
+}
+
+// Helper function to clear status history
+export function clearStatusHistory(statusDiv: HTMLDivElement) {
+    statusDiv.innerHTML = '';
+    const statusSection = statusDiv.closest('#statusSection') as HTMLDivElement;
+    if (statusSection) {
+        statusSection.style.display = 'none';
+    }
 }
 
 /**
@@ -154,7 +230,7 @@ export async function connectToMetaMask(
         try {
             await window.ethereum?.request({
                 method: 'wallet_switchEthereumChain',
-                params: [{ chainId: `0x${(MAINNET ? base.id : baseSepolia.id).toString(16)}` }], // Base chainId
+                params: [{ chainId: `0x${(getIsMainnet() ? base.id : baseSepolia.id).toString(16)}` }], // Base chainId
             });
         } catch (switchError: any) {
             showStatus(`Chain switch error: ${switchError.message}`, 'error');

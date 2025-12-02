@@ -97,30 +97,105 @@
             cursor: not-allowed;
         }
 
-        .status {
-            padding: 12px;
-            border-radius: 8px;
-            margin-top: 16px;
-            font-size: 14px;
-            word-break: break-all;
+        .status-container {
+            max-height: 400px;
+            overflow-y: auto;
+            display: none;
         }
 
-        .status.success {
+        .status-container:not(:empty) {
+            display: block;
+        }
+
+        .status-container::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .status-container::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 4px;
+        }
+
+        .status-container::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 4px;
+        }
+
+        .status-container::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+
+        .status-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .status-header h3 {
+            margin: 0;
+            font-size: 14px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .clear-status-btn {
+            padding: 4px 12px;
+            background: #f8f9fa;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 12px;
+            color: #666;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .clear-status-btn:hover {
+            background: #e9ecef;
+            border-color: #ccc;
+        }
+
+        .status-item {
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            font-size: 14px;
+            word-break: break-all;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .status-item:first-child {
+            margin-top: 0;
+        }
+
+        .status-item.success {
             background: #d4edda;
             color: #155724;
             border: 1px solid #c3e6cb;
         }
 
-        .status.error {
+        .status-item.error {
             background: #f8d7da;
             color: #721c24;
             border: 1px solid #f5c6cb;
         }
 
-        .status.info {
+        .status-item.info {
             background: #d1ecf1;
             color: #0c5460;
             border: 1px solid #bee5eb;
+        }
+
+        .status-message {
+            flex: 1;
+        }
+
+        .status-timestamp {
+            font-size: 11px;
+            opacity: 0.7;
+            margin-top: 4px;
         }
 
         .account-info {
@@ -134,6 +209,75 @@
 
         .account-info strong {
             color: #667eea;
+        }
+
+        select {
+            transition: border-color 0.3s;
+        }
+
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .amount-button {
+            padding: 10px;
+            background: #f8f9fa;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            color: #333;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .amount-button:hover:not(:disabled) {
+            border-color: #667eea;
+            background: #f0f0ff;
+        }
+
+        .amount-button.selected {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-color: #667eea;
+        }
+
+        .amount-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .network-toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: 0.4s;
+            border-radius: 30px;
+        }
+
+        .network-toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 22px;
+            width: 22px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: 0.4s;
+            border-radius: 50%;
+        }
+
+        #networkToggle:checked+.network-toggle-slider {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+
+        #networkToggle:checked+.network-toggle-slider:before {
+            transform: translateX(30px);
         }
     </style>
 </head>
@@ -152,25 +296,55 @@
         </div>
 
         <div class="section">
-            <button id="sendDepositBatchBtn" disabled>
-                Send Batch Transaction (Approve + Execute Order)
-            </button>
+            <label for="networkToggle" style="display: flex; align-items: center; gap: 12px; cursor: pointer;">
+                <span style="flex: 1;">Network:</span>
+                <div style="position: relative; display: inline-block; width: 60px; height: 30px;">
+                    <input type="checkbox" id="networkToggle" style="opacity: 0; width: 0; height: 0;">
+                    <label for="networkToggle" class="network-toggle-slider"></label>
+                </div>
+                <span id="networkLabel" style="min-width: 80px; font-weight: 600;">Mainnet</span>
+            </label>
         </div>
 
         <div class="section">
-            <button id="testEthereumDepositBatchBtn" disabled
-                style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
-                🧪 Test Ethereum Batch Only (Skip Bridging)
-            </button>
+            <label for="vaultSelect">Select Vault:</label>
+            <select id="vaultSelect"
+                style="width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px; background: white; cursor: pointer;">
+                <option value="">Loading vaults...</option>
+            </select>
         </div>
 
         <div class="section">
-            <button id="withdrawBtn" disabled style="background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);">
-                💸 Withdraw from Vault (Withdraw + Swap + Bridge to Base)
-            </button>
+            <label>Select Amount (USDC):</label>
+            <div id="amountButtons"
+                style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px;">
+                <!-- Amount buttons will be populated by JavaScript -->
+            </div>
         </div>
 
-        <div id="status"></div>
+        <div class="section">
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
+                <button id="sendDepositBatchBtn" disabled>
+                    💰 Deposit
+                </button>
+                <button id="testEthereumDepositBatchBtn" disabled
+                    style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); display: none;">
+                    🧪 Test Deposit (No Bridge)
+                </button>
+                <button id="withdrawBtn" disabled
+                    style="background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);">
+                    💸 Withdraw
+                </button>
+            </div>
+        </div>
+
+        <div id="statusSection" class="section" style="display: none;">
+            <div class="status-header">
+                <h3>Status History</h3>
+                <button class="clear-status-btn" id="clearStatusBtn">Clear</button>
+            </div>
+            <div id="status" class="status-container"></div>
+        </div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>
