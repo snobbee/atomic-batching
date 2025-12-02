@@ -212,8 +212,8 @@ withdrawBtn.addEventListener('click', () => {
 });
 
 // Helper function to show status messages (wrapper that uses statusDiv)
-function showStatus(message: string, type: 'success' | 'error' | 'info') {
-    showStatusUtil(message, type, statusDiv);
+function showStatus(message: string, type: 'success' | 'error' | 'info', network?: 'base' | 'eth') {
+    showStatusUtil(message, type, statusDiv, network);
 }
 
 // Clear status history button

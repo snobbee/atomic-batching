@@ -16,7 +16,7 @@ import { getIsMainnet } from './constants';
 
 // UI state interface for bridging functions
 export interface BridgingUIState {
-    showStatus: (message: string, type: 'success' | 'error' | 'info') => void;
+    showStatus: (message: string, type: 'success' | 'error' | 'info', network?: 'base' | 'eth') => void;
     connectedAddress: Address | null;
     isCCTPMinting: { value: boolean };
     sendDepositBatchBtn?: HTMLButtonElement;

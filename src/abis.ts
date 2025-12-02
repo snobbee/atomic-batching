@@ -709,6 +709,11 @@ export const MORPHO_VAULT_ABI = parseAbi([
     'function balanceOf(address account) view returns (uint256)',
 ]);
 
+// ABI for vault deposit
+export const AERODROME_DEPOSIT_ABI = parseAbi([
+    'function deposit(uint256 amount) returns (uint256)'
+]);
+
 // Filtered ABI with only the payable executeOrder function (no Permit2)
 // This ensures simulateContract and writeContract use the same function signature
 export const BEEFY_ZAP_EXECUTE_ORDER_ABI = [
@@ -834,3 +839,7 @@ export const BEEFY_ZAP_EXECUTE_ORDER_ABI = [
     }
 ] as const
 
+// ABI for Aerodrome router addLiquidity
+export const AERODROME_ADD_LIQUIDITY_ABI = [
+    'function addLiquidity(address tokenA, address tokenB, bool stable, uint256 amountADesired, uint256 amountBDesired, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline) returns (uint256 amountA, uint256 amountB, uint256 liquidity)'
+] as const

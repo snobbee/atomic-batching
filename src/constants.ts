@@ -41,8 +41,9 @@ export const USDC_ADDRESS_ETHEREUM = getUSDCAddressEthereum();
 // @ts-expect-error - Intentionally unused, kept for reference to verify minted USDC address
 const USDC_ADDRESS: Address = USDC_ADDRESS_BASE; // Default to Base for backward compatibility
 
-// Vault configuration type
-export type VaultConfig = {
+// Vault type definitions
+export type SingleAssetVaultConfig = {
+    type: 'single-asset';
     id: string;
     name: string;
     network: 'eth' | 'base';
@@ -53,11 +54,46 @@ export type VaultConfig = {
     kyberChain: 'ethereum' | 'base';
 };
 
+export type LPUSDCVaultConfig = {
+    type: 'lp-usdc';
+    id: string;
+    name: string;
+    network: 'eth' | 'base';
+    vaultAddress: Address;
+    inputTokenAddress: Address; // USDC (always)
+    lpTokenAddress: Address; // LP token address
+    tokenA: Address; // Non-USDC token (e.g., WETH)
+    tokenB: Address; // USDC token
+    isStable: boolean; // Whether the LP is a stable pair
+    beefyZapRouter: Address;
+    kyberChain: 'ethereum' | 'base';
+};
+
+export type LPNonUSDCVaultConfig = {
+    type: 'lp-non-usdc';
+    id: string;
+    name: string;
+    network: 'eth' | 'base';
+    vaultAddress: Address;
+    inputTokenAddress: Address; // USDC (always)
+    lpTokenAddress: Address; // LP token address
+    tokenA: Address; // First non-USDC token (e.g., AERO)
+    tokenB: Address; // Second non-USDC token (e.g., wstETH)
+    isStable: boolean; // Whether the LP is a stable pair
+    beefyZapRouter: Address;
+    kyberChain: 'ethereum' | 'base';
+};
+
+// Union type for all vault configurations
+export type VaultConfig = SingleAssetVaultConfig | LPUSDCVaultConfig | LPNonUSDCVaultConfig;
+
 // Get available vaults configuration (function to get current network vaults)
 export function getVaults(): VaultConfig[] {
     const isMainnet = getIsMainnet();
     return [
+        // Single asset vault: Morpho Steakhouse RUSD (Ethereum)
         {
+            type: 'single-asset',
             id: 'morpho-rusd-eth',
             name: 'Morpho Steakhouse RUSD (Ethereum)',
             network: 'eth',
@@ -67,18 +103,51 @@ export function getVaults(): VaultConfig[] {
             beefyZapRouter: isMainnet ? '0x5Cc9400FfB4Da168Cf271e912F589462C3A00d1F' : '0x5Cc9400FfB4Da168Cf271e912F589462C3A00d1F',
             kyberChain: 'ethereum',
         },
-        // Add more vaults here as needed
-        // Example for a Base vault:
-        // {
-        //     id: 'example-base-vault',
-        //     name: 'Example Vault (Base)',
-        //     network: 'base',
-        //     vaultAddress: '0x...',
-        //     inputTokenAddress: getUSDCAddressBase(),
-        //     outputTokenAddress: '0x...', // Token the vault accepts
-        //     beefyZapRouter: getBeefyZapRouterBase(),
-        //     kyberChain: 'base',
-        // },
+        // LP vault with USDC: WETH-USDC Aerodrome LP (Base)
+        {
+            type: 'lp-usdc',
+            id: 'weth-usdc-aerodrome-base',
+            name: 'WETH-USDC Aerodrome LP (Base)',
+            network: 'base',
+            vaultAddress: isMainnet ? '0x09139a80454609b69700836a9ee12db4b5dbb15f' : '0x09139a80454609b69700836a9ee12db4b5dbb15f',
+            inputTokenAddress: getUSDCAddressBase(),
+            lpTokenAddress: isMainnet ? '0xcdac0d6c6c59727a65f871236188350531885c43' : '0xcdac0d6c6c59727a65f871236188350531885c43',
+            tokenA: getWETHAddressBase(), // WETH
+            tokenB: getUSDCAddressBase(), // USDC
+            isStable: false, // Volatile pair
+            beefyZapRouter: getBeefyZapRouterBase(),
+            kyberChain: 'base',
+        },
+        // LP vault without USDC: AERO-wstETH Aerodrome LP (Base)
+        {
+            type: 'lp-non-usdc',
+            id: 'aero-wsteth-aerodrome-base',
+            name: 'AERO-wstETH Aerodrome LP (Base)',
+            network: 'base',
+            vaultAddress: isMainnet ? '0x06a613d3a056d4b04d7523c11d82c67bebf9d850' : '0x06a613d3a056d4b04d7523c11d82c67bebf9d850',
+            inputTokenAddress: getUSDCAddressBase(),
+            lpTokenAddress: isMainnet ? '0x82a0c1a0d4ef0c0ca3cfda3ad1aa78309cc6139b' : '0x82a0c1a0d4ef0c0ca3cfda3ad1aa78309cc6139b', // TODO: Add actual LP token address
+            tokenA: getAEROAddressBase(), // AERO
+            tokenB: getWstETHAddressBase(), // wstETH
+            isStable: false, // Volatile pair
+            beefyZapRouter: getBeefyZapRouterBase(),
+            kyberChain: 'base',
+        },
+        // LP vault without USDC: WETH-ZRO Aerodrome concentrated liquidity pair (Base)
+        {
+            type: 'lp-non-usdc',
+            id: 'aero-cow-weth-zro-vault',
+            name: 'Aerodrome WETH-ZRO concentrated LP (Base)',
+            network: 'base',
+            vaultAddress: isMainnet ? '0x8B1f5874E0B5aa3Eeb117B82aF8d59fCb52d122a' : '0x8B1f5874E0B5aa3Eeb117B82aF8d59fCb52d122a',
+            inputTokenAddress: getUSDCAddressBase(),
+            lpTokenAddress: isMainnet ? '0x02FabF576505Ec464D45Fb2aaaB6d97607A2D308' : '0x02FabF576505Ec464D45Fb2aaaB6d97607A2D308',
+            tokenA: getWETHAddressBase(), // WETH
+            tokenB: getZROAddressBase(), // ZRO
+            isStable: false, // Volatile pair
+            beefyZapRouter: getBeefyZapRouterBase(),
+            kyberChain: 'base',
+        },
     ];
 }
 
@@ -157,6 +226,32 @@ export function getBeefyZapRouterEthereum(): Address {
 export const BEEFY_ZAP_ROUTER_BASE = getBeefyZapRouterBase();
 export const BEEFY_ZAP_ROUTER_ETHEREUM = getBeefyZapRouterEthereum();
 export const BEEFY_ZAP_ROUTER = BEEFY_ZAP_ROUTER_BASE;
+
+// Aerodrome Router address (Base only)
+export function getAerodromeRouterBase(): Address {
+    return '0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43'; // Base mainnet
+}
+// Legacy export
+export const AERODROME_ROUTER_BASE = getAerodromeRouterBase();
+
+// Base token addresses (functions to get current network addresses)
+export function getWETHAddressBase(): Address {
+    return getIsMainnet() ? '0x4200000000000000000000000000000000000006' : '0x4200000000000000000000000000000000000006'; // WETH on Base
+}
+export function getAEROAddressBase(): Address {
+    return getIsMainnet() ? '0x940181a94A35A4569E4529A3CDfB74e38FD98631' : '0x940181a94A35A4569E4529A3CDfB74e38FD98631'; // AERO on Base
+}
+export function getWstETHAddressBase(): Address {
+    return getIsMainnet() ? '0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452' : '0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452'; // wstETH on Base
+}
+export function getZROAddressBase(): Address {
+    return getIsMainnet() ? '0x6985884C4392D348587B19cb9eAAf157F13271cd' : '0x6985884C4392D348587B19cb9eAAf157F13271cd'; // ZRO on Base
+}
+// Legacy exports
+export const WETH_ADDRESS_BASE = getWETHAddressBase();
+export const AERO_ADDRESS_BASE = getAEROAddressBase();
+export const WSTETH_ADDRESS_BASE = getWstETHAddressBase();
+export const ZRO_ADDRESS_BASE = getZROAddressBase();
 
 // Legacy exports for backward compatibility (will be removed in future)
 // rUSD token address on Ethereum
