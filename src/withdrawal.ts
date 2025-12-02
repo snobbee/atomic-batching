@@ -294,7 +294,7 @@ export async function runBaseWithdrawalBatch(message: `0x${string}`, attestation
             throw new Error('No transaction hash found after polling');
         }
 
-        uiState.showStatus(`Base mint submitted: ${txHash}\nWaiting for confirmation...`, 'info');
+        uiState.showStatus(`Base mint submitted: ${txHash}\nWaiting for confirmation...`, 'info', 'base');
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
         uiState.showStatus(
@@ -302,7 +302,8 @@ export async function runBaseWithdrawalBatch(message: `0x${string}`, attestation
             `Transaction: ${receipt.transactionHash}\n` +
             `Block: ${receipt.blockNumber}\n\n` +
             `USDC has been minted on Base!`,
-            'success'
+            'success',
+            'base'
         );
 
     } catch (error: any) {
@@ -540,7 +541,7 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState, vault
             throw new Error('No transaction hash found after polling');
         }
 
-        uiState.showStatus(`Withdrawal batch submitted: ${txHash}\nWaiting for confirmation...`, 'info');
+        uiState.showStatus(`Withdrawal batch submitted: ${txHash}\nWaiting for confirmation...`, 'info', 'eth');
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
         const bridgeText = needsBridging ? 'Tokens have been bridged! Retrieving attestation for mint...' : 'Tokens have been withdrawn!';
@@ -549,7 +550,8 @@ export async function runEthereumWithdrawalBatch(uiState: BridgingUIState, vault
             `Transaction: ${receipt.transactionHash}\n` +
             `Block: ${receipt.blockNumber}\n\n` +
             bridgeText,
-            'success'
+            'success',
+            'eth'
         );
 
         // Retrieve attestation and run Base mint batch (if bridging)

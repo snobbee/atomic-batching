@@ -9,17 +9,20 @@ import {
     ZERO_ADDRESS,
     KYBER_CLIENT_ID,
     type VaultConfig,
+    getAerodromeRouterBase,
 } from './constants';
 import {
     USDC_ABI,
     CCTP_MESSAGE_TRANSMITTER_ABI,
     BEEFY_ROUTER_MINI_ABI,
     MORPHO_VAULT_ABI,
-    BEEFY_ZAP_EXECUTE_ORDER_ABI
+    BEEFY_ZAP_EXECUTE_ORDER_ABI,
+    AERODROME_DEPOSIT_ABI
 } from './abis';
 import { getIsMainnet } from './constants';
 import { buildCCTPBridge, retrieveAttestation, type BridgingUIState } from './bridging';
 import { kyberEncodeSwap } from './swap';
+import { locateAerodromeOffsets } from './utils';
 
 /**
  * Builds deposit batch calls: mint USDC (if bridging) + Beefy zap (swap + deposit to vault)
@@ -61,7 +64,31 @@ export async function buildDepositBatch(
         };
     }
 
-    // Build Beefy zap: swap input token to output token and deposit to vault
+    // Handle different vault types
+    if (vault.type === 'single-asset') {
+        // Single asset vault: swap USDC to output token, then deposit
+        return await buildSingleAssetDeposit(vault, amount, recipient, deadline, mintCall);
+    } else if (vault.type === 'lp-usdc') {
+        // LP vault with USDC: swap half USDC to tokenA, add liquidity, deposit LP
+        return await buildLPUSDCDeposit(vault, amount, recipient, deadline, mintCall);
+    } else if (vault.type === 'lp-non-usdc') {
+        // LP vault without USDC: swap half USDC to tokenA, half to tokenB, add liquidity, deposit LP
+        return await buildLPNonUSDCDeposit(vault, amount, recipient, deadline, mintCall);
+    } else {
+        throw new Error(`Unknown vault type: ${(vault as any).type}`);
+    }
+}
+
+/**
+ * Build deposit zap for single asset vault (e.g., Morpho RUSD)
+ */
+async function buildSingleAssetDeposit(
+    vault: Extract<VaultConfig, { type: 'single-asset' }>,
+    amount: bigint,
+    recipient: Address,
+    deadline: bigint,
+    mintCall: { to: Address; data: `0x${string}`; value: bigint } | undefined
+) {
     // Step 1: Swap input token to output token using KyberSwap
     const kyberSwap = await kyberEncodeSwap({
         tokenIn: vault.inputTokenAddress,
@@ -113,18 +140,18 @@ export async function buildDepositBatch(
             tokens: [
                 {
                     token: vault.inputTokenAddress,
-                    index: -1, // Approve input token, use order input amount (don't replace calldata)
+                    index: -1, // Approve input token, use order input amount
                 },
             ],
         },
         {
-            target: vault.vaultAddress, // Use vault directly
+            target: vault.vaultAddress,
             value: 0n,
             data: vaultDepositData,
             tokens: [
                 {
                     token: vault.outputTokenAddress,
-                    index: 4, // Replace first parameter (assets) with output token balance (offset 4 = after 4-byte function selector)
+                    index: 4, // Replace first parameter (assets) with output token balance
                 },
             ],
         },
@@ -133,7 +160,292 @@ export async function buildDepositBatch(
     const beefyZapData = encodeFunctionData({
         abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
         functionName: 'executeOrder',
-        args: [order, route],
+        args: [order, route] as any,
+    });
+
+    return {
+        mintCall,
+        beefyZapCall: {
+            to: vault.beefyZapRouter,
+            data: beefyZapData,
+            value: 0n,
+        },
+        beefyOrder: order,
+        beefyRoute: route,
+    };
+}
+
+/**
+ * Build deposit zap for LP vault with USDC (e.g., WETH-USDC Aerodrome LP)
+ */
+async function buildLPUSDCDeposit(
+    vault: Extract<VaultConfig, { type: 'lp-usdc' }>,
+    amount: bigint,
+    recipient: Address,
+    deadline: bigint,
+    mintCall: { to: Address; data: `0x${string}`; value: bigint } | undefined
+) {
+    const usdcIn = amount;
+    const half = usdcIn / BigInt(2);
+    const swapAmount = half === BigInt(0) ? usdcIn : half;
+
+    // Step 1: Swap half USDC to tokenA (WETH)
+    const kyberStep = await kyberEncodeSwap({
+        tokenIn: vault.inputTokenAddress, // USDC
+        tokenOut: vault.tokenA, // WETH
+        amountIn: swapAmount,
+        zapRouter: vault.beefyZapRouter,
+        slippageBps: 50,
+        deadlineSec: Number(deadline),
+        clientId: KYBER_CLIENT_ID,
+        chain: vault.kyberChain,
+    });
+
+    // Step 2: Get Aerodrome addLiquidity calldata with offsets
+    const {
+        amountAOffset: AERODROME_AMOUNT_A_OFFSET,
+        amountBOffset: AERODROME_AMOUNT_B_OFFSET,
+        data: aerodromeAddLiquidityCalldata,
+    } = locateAerodromeOffsets(vault.tokenA, vault.tokenB, vault.isStable, vault.beefyZapRouter, deadline);
+
+    // Step 3: Vault deposit call (deposit LP token)
+    // Encode full deposit call - assets amount will be replaced with LP token balance
+    const vaultDepositData = encodeFunctionData({
+        abi: AERODROME_DEPOSIT_ABI,
+        functionName: 'deposit',
+        args: [0n], // assets amount will be replaced with LP token balance
+    });
+
+    // Build order - output LP token
+    const order = {
+        inputs: [
+            {
+                token: vault.inputTokenAddress,
+                amount: usdcIn,
+            },
+        ],
+        outputs: [
+            {
+                token: vault.lpTokenAddress,
+                minOutputAmount: BigInt(0),
+            },
+        ],
+        relay: {
+            target: ZERO_ADDRESS,
+            value: BigInt(0),
+            data: '0x' as `0x${string}`,
+        },
+        user: recipient,
+        recipient: recipient,
+    };
+
+    // Build route: swap USDC -> WETH, add liquidity, deposit LP
+    const route = [
+        {
+            target: kyberStep.routerAddress,
+            value: kyberStep.value,
+            data: kyberStep.data,
+            tokens: [
+                {
+                    token: vault.inputTokenAddress,
+                    index: -1,
+                },
+            ],
+        },
+        {
+            target: getAerodromeRouterBase(),
+            value: BigInt(0),
+            data: aerodromeAddLiquidityCalldata,
+            tokens: [
+                {
+                    token: vault.tokenA,
+                    index: AERODROME_AMOUNT_A_OFFSET,
+                },
+                {
+                    token: vault.tokenB,
+                    index: AERODROME_AMOUNT_B_OFFSET,
+                },
+            ],
+        },
+        {
+            target: vault.vaultAddress,
+            value: BigInt(0),
+            data: vaultDepositData,
+            tokens: [
+                {
+                    token: vault.lpTokenAddress,
+                    index: -1,
+                },
+            ],
+        },
+    ];
+
+    const beefyZapData = encodeFunctionData({
+        abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+        functionName: 'executeOrder',
+        args: [order, route] as any,
+    });
+
+    return {
+        mintCall,
+        beefyZapCall: {
+            to: vault.beefyZapRouter,
+            data: beefyZapData,
+            value: 0n,
+        },
+        beefyOrder: order,
+        beefyRoute: route,
+    };
+}
+
+/**
+ * Build deposit zap for LP vault without USDC (e.g., AERO-wstETH Aerodrome LP)
+ */
+async function buildLPNonUSDCDeposit(
+    vault: Extract<VaultConfig, { type: 'lp-non-usdc' }>,
+    amount: bigint,
+    recipient: Address,
+    deadline: bigint,
+    mintCall: { to: Address; data: `0x${string}`; value: bigint } | undefined
+) {
+    const usdcIn = amount;
+    const half = usdcIn / BigInt(2);
+    const swapAmount = half === BigInt(0) ? usdcIn : half;
+
+    // Step 1: Swap half USDC to tokenA (AERO)
+    const kyberStepAero = await kyberEncodeSwap({
+        tokenIn: vault.inputTokenAddress, // USDC
+        tokenOut: vault.tokenA, // AERO
+        amountIn: swapAmount,
+        zapRouter: vault.beefyZapRouter,
+        slippageBps: 50,
+        deadlineSec: Number(deadline),
+        clientId: KYBER_CLIENT_ID,
+        chain: vault.kyberChain,
+    });
+
+    // Step 2: Swap half USDC to tokenB (wstETH)
+    const kyberStepWstEth = await kyberEncodeSwap({
+        tokenIn: vault.inputTokenAddress, // USDC
+        tokenOut: vault.tokenB, // wstETH
+        amountIn: swapAmount,
+        zapRouter: vault.beefyZapRouter,
+        slippageBps: 50,
+        deadlineSec: Number(deadline),
+        clientId: KYBER_CLIENT_ID,
+        chain: vault.kyberChain,
+    });
+
+    // Step 3: Get Aerodrome addLiquidity calldata with offsets
+    const {
+        amountAOffset: AERODROME_AMOUNT_A_OFFSET,
+        amountBOffset: AERODROME_AMOUNT_B_OFFSET,
+        data: aerodromeAddLiquidityCalldata,
+    } = locateAerodromeOffsets(vault.tokenA, vault.tokenB, vault.isStable, vault.beefyZapRouter, deadline);
+
+    // Step 4: Vault deposit call (deposit LP token)
+    // Encode full deposit call - assets amount will be replaced with LP token balance
+    const vaultDepositData = encodeFunctionData({
+        abi: AERODROME_DEPOSIT_ABI,
+        functionName: 'deposit',
+        args: [0n], // assets amount will be replaced with LP token balance
+    });
+
+    // Build order - output LP token
+    const order = {
+        inputs: [
+            {
+                token: vault.inputTokenAddress,
+                amount: usdcIn,
+            },
+        ],
+        outputs: [
+            {
+                token: vault.vaultAddress,
+                minOutputAmount: BigInt(0),
+            },
+            {
+                token: vault.lpTokenAddress,
+                minOutputAmount: BigInt(0),
+            },
+            {
+                token: vault.inputTokenAddress,
+                minOutputAmount: BigInt(0),
+            },
+            {
+                token: vault.tokenA,
+                minOutputAmount: BigInt(0),
+            },
+            {
+                token: vault.tokenB,
+                minOutputAmount: BigInt(0),
+            },
+        ],
+        relay: {
+            target: ZERO_ADDRESS,
+            value: BigInt(0),
+            data: '0x' as `0x${string}`,
+        },
+        user: recipient,
+        recipient: recipient,
+    };
+
+    // Build route: swap USDC -> AERO, swap USDC -> wstETH, add liquidity, deposit LP
+    const route = [
+        {
+            target: kyberStepAero.routerAddress,
+            value: kyberStepAero.value,
+            data: kyberStepAero.data,
+            tokens: [
+                {
+                    token: vault.inputTokenAddress,
+                    index: -1,
+                },
+            ],
+        },
+        {
+            target: kyberStepWstEth.routerAddress,
+            value: kyberStepWstEth.value,
+            data: kyberStepWstEth.data,
+            tokens: [
+                {
+                    token: vault.inputTokenAddress,
+                    index: -1,
+                },
+            ],
+        },
+        {
+            target: getAerodromeRouterBase(),
+            value: BigInt(0),
+            data: aerodromeAddLiquidityCalldata,
+            tokens: [
+                {
+                    token: vault.tokenA,
+                    index: AERODROME_AMOUNT_A_OFFSET,
+                },
+                {
+                    token: vault.tokenB,
+                    index: AERODROME_AMOUNT_B_OFFSET,
+                },
+            ],
+        },
+        {
+            target: vault.vaultAddress,
+            value: BigInt(0),
+            data: vaultDepositData,
+            tokens: [
+                {
+                    token: vault.lpTokenAddress,
+                    index: -1,
+                },
+            ],
+        },
+    ];
+
+    const beefyZapData = encodeFunctionData({
+        abi: BEEFY_ZAP_EXECUTE_ORDER_ABI,
+        functionName: 'executeOrder',
+        args: [order, route] as any,
     });
 
     return {
@@ -306,7 +618,7 @@ export async function runBaseDepositBatch(uiState: BridgingUIState, vault: Vault
                 throw new Error('No transaction hash found after polling');
             }
 
-            uiState.showStatus(`Base batch submitted: ${txHash}\nWaiting for confirmation...`, 'info');
+            uiState.showStatus(`Base batch submitted: ${txHash}\nWaiting for confirmation...`, 'info', 'base');
             const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
             uiState.showStatus(
@@ -314,7 +626,8 @@ export async function runBaseDepositBatch(uiState: BridgingUIState, vault: Vault
                 `Transaction: ${receipt.transactionHash}\n` +
                 `Block: ${receipt.blockNumber}\n\n` +
                 `Retrieving attestation for Ethereum mint...`,
-                'success'
+                'success',
+                'base'
             );
 
             // Retrieve attestation and run Ethereum batch
@@ -520,7 +833,7 @@ export async function testEthereumDepositBatchOnly(uiState: BridgingUIState, vau
             throw new Error('No transaction hash found after polling');
         }
 
-        uiState.showStatus(`${vault.network === 'eth' ? 'Ethereum' : 'Base'} test batch submitted: ${txHash}\nWaiting for confirmation...`, 'info');
+        uiState.showStatus(`${vault.network === 'eth' ? 'Ethereum' : 'Base'} test batch submitted: ${txHash}\nWaiting for confirmation...`, 'info', vault.network);
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
         uiState.showStatus(
@@ -528,7 +841,8 @@ export async function testEthereumDepositBatchOnly(uiState: BridgingUIState, vau
             `Transaction: ${receipt.transactionHash}\n` +
             `Block: ${receipt.blockNumber}\n\n` +
             `Tokens have been swapped and deposited to ${vault.name}!`,
-            'success'
+            'success',
+            vault.network
         );
 
     } catch (error: any) {
@@ -713,7 +1027,7 @@ export async function runDepositBatch(
             throw new Error('No transaction hash found after polling');
         }
 
-        uiState.showStatus(`${vault.network === 'eth' ? 'Ethereum' : 'Base'} batch submitted: ${txHash}\nWaiting for confirmation...`, 'info');
+        uiState.showStatus(`${vault.network === 'eth' ? 'Ethereum' : 'Base'} batch submitted: ${txHash}\nWaiting for confirmation...`, 'info', vault.network);
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
         const bridgeText = message && attestation ? 'bridged, ' : '';
@@ -722,7 +1036,8 @@ export async function runDepositBatch(
             `Transaction: ${receipt.transactionHash}\n` +
             `Block: ${receipt.blockNumber}\n\n` +
             `Tokens have been ${bridgeText}swapped and deposited to ${vault.name}!`,
-            'success'
+            'success',
+            vault.network
         );
 
     } catch (error: any) {

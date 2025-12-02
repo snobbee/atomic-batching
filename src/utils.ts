@@ -1,6 +1,8 @@
 import { type Address } from 'viem';
 import { baseSepolia, base, mainnet, sepolia } from 'viem/chains';
 import { getIsMainnet } from './constants';
+import { Interface } from 'ethers'
+import { AERODROME_ADD_LIQUIDITY_ABI } from './abis'
 
 /**
  * Converts an Ethereum address to bytes32 format (padded with zeros on the left)
@@ -138,8 +140,37 @@ function formatTimestamp(date: Date): string {
 // Maximum number of status entries to keep (to prevent memory issues)
 const MAX_STATUS_HISTORY = 100;
 
+/**
+ * Generate explorer URL for a transaction hash based on network and mainnet/testnet
+ */
+export function getExplorerUrl(txHash: string, network: 'base' | 'eth'): string {
+    const isMainnet = getIsMainnet();
+
+    if (network === 'base') {
+        const subdomain = isMainnet ? 'basescan.org' : 'sepolia.basescan.org';
+        return `https://${subdomain}/tx/${txHash}`;
+    } else {
+        // Ethereum
+        const subdomain = isMainnet ? 'etherscan.io' : 'sepolia.etherscan.io';
+        return `https://${subdomain}/tx/${txHash}`;
+    }
+}
+
+/**
+ * Format message text to convert transaction hashes to clickable links
+ */
+function formatMessageWithLinks(message: string, network: 'base' | 'eth'): string {
+    // Match transaction hashes (0x followed by 64 hex characters)
+    const txHashRegex = /(0x[a-fA-F0-9]{64})/g;
+
+    return message.replace(txHashRegex, (match) => {
+        const url = getExplorerUrl(match, network);
+        return `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color: inherit; text-decoration: underline;">${match}</a>`;
+    });
+}
+
 // Helper function to show status messages (adds to history)
-export function showStatus(message: string, type: 'success' | 'error' | 'info', statusDiv: HTMLDivElement) {
+export function showStatus(message: string, type: 'success' | 'error' | 'info', statusDiv: HTMLDivElement, network?: 'base' | 'eth') {
     // Show the status section if it's hidden
     const statusSection = statusDiv.closest('#statusSection') as HTMLDivElement;
     if (statusSection) {
@@ -159,7 +190,13 @@ export function showStatus(message: string, type: 'success' | 'error' | 'info', 
 
     const messageDiv = document.createElement('div');
     messageDiv.className = 'status-message';
-    messageDiv.textContent = message;
+
+    // If network is provided, format message with clickable links
+    if (network) {
+        messageDiv.innerHTML = formatMessageWithLinks(message, network);
+    } else {
+        messageDiv.textContent = message;
+    }
 
     const timestampDiv = document.createElement('div');
     timestampDiv.className = 'status-timestamp';
@@ -257,3 +294,45 @@ declare global {
     }
 }
 
+/**
+ * Locate Aerodrome offsets - matches PoC function structure
+ */
+export function locateAerodromeOffsets(
+    tokenA: Address,
+    tokenB: Address,
+    stable: boolean,
+    to: Address,
+    deadline: bigint
+): { amountAOffset: number; amountBOffset: number; data: `0x${string}` } {
+    const SENT_A_STR = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1'
+    const SENT_B_STR = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2'
+    const SENT_A = BigInt(SENT_A_STR)
+    const SENT_B = BigInt(SENT_B_STR)
+
+    const iface = new Interface(AERODROME_ADD_LIQUIDITY_ABI)
+    const data = iface.encodeFunctionData('addLiquidity', [
+        tokenA,
+        tokenB,
+        stable,
+        SENT_A,
+        SENT_B,
+        BigInt(0),
+        BigInt(0),
+        to,
+        deadline,
+    ])
+
+    const hex = data.slice(2)
+    const findOffset = (sentinel: bigint) => {
+        const needle = sentinel.toString(16).padStart(64, '0')
+        const idx = hex.indexOf(needle)
+        if (idx === -1) throw new Error('Sentinel not found in Aerodrome calldata')
+        return idx / 2
+    }
+
+    return {
+        amountAOffset: findOffset(SENT_A),
+        amountBOffset: findOffset(SENT_B),
+        data: data as `0x${string}`,
+    }
+}
