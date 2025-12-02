@@ -714,6 +714,11 @@ export const AERODROME_DEPOSIT_ABI = parseAbi([
     'function deposit(uint256 amount) returns (uint256)'
 ]);
 
+// ABI for vault withdraw
+export const AERODROME_WITHDRAW_ABI = parseAbi([
+    'function withdraw(uint256 amount)',
+]);
+
 // Filtered ABI with only the payable executeOrder function (no Permit2)
 // This ensures simulateContract and writeContract use the same function signature
 export const BEEFY_ZAP_EXECUTE_ORDER_ABI = [
@@ -842,4 +847,112 @@ export const BEEFY_ZAP_EXECUTE_ORDER_ABI = [
 // ABI for Aerodrome router addLiquidity
 export const AERODROME_ADD_LIQUIDITY_ABI = [
     'function addLiquidity(address tokenA, address tokenB, bool stable, uint256 amountADesired, uint256 amountBDesired, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline) returns (uint256 amountA, uint256 amountB, uint256 liquidity)'
+] as const
+
+// ABI for Aerodrome router removeLiquidity
+export const AERODROME_REMOVE_LIQUIDITY_ABI = [
+    'function removeLiquidity(address tokenA, address tokenB, bool stable, uint256 liquidity, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline) returns (uint256 amountA, uint256 amountB)'
+] as const
+
+// Standard ERC20 ABI for token interactions
+export const ERC20_ABI = [
+    // Read functions
+    {
+        inputs: [],
+        name: "name",
+        outputs: [{ internalType: "string", name: "", type: "string" }],
+        stateMutability: "view",
+        type: "function",
+    },
+    {
+        inputs: [],
+        name: "symbol",
+        outputs: [{ internalType: "string", name: "", type: "string" }],
+        stateMutability: "view",
+        type: "function",
+    },
+    {
+        inputs: [],
+        name: "decimals",
+        outputs: [{ internalType: "uint8", name: "", type: "uint8" }],
+        stateMutability: "view",
+        type: "function",
+    },
+    {
+        inputs: [],
+        name: "totalSupply",
+        outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
+        stateMutability: "view",
+        type: "function",
+    },
+    {
+        inputs: [{ internalType: "address", name: "account", type: "address" }],
+        name: "balanceOf",
+        outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
+        stateMutability: "view",
+        type: "function",
+    },
+    {
+        inputs: [
+            { internalType: "address", name: "owner", type: "address" },
+            { internalType: "address", name: "spender", type: "address" },
+        ],
+        name: "allowance",
+        outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
+        stateMutability: "view",
+        type: "function",
+    },
+    // Write functions
+    {
+        inputs: [
+            { internalType: "address", name: "spender", type: "address" },
+            { internalType: "uint256", name: "amount", type: "uint256" },
+        ],
+        name: "approve",
+        outputs: [{ internalType: "bool", name: "", type: "bool" }],
+        stateMutability: "nonpayable",
+        type: "function",
+    },
+    {
+        inputs: [
+            { internalType: "address", name: "to", type: "address" },
+            { internalType: "uint256", name: "amount", type: "uint256" },
+        ],
+        name: "transfer",
+        outputs: [{ internalType: "bool", name: "", type: "bool" }],
+        stateMutability: "nonpayable",
+        type: "function",
+    },
+    {
+        inputs: [
+            { internalType: "address", name: "from", type: "address" },
+            { internalType: "address", name: "to", type: "address" },
+            { internalType: "uint256", name: "amount", type: "uint256" },
+        ],
+        name: "transferFrom",
+        outputs: [{ internalType: "bool", name: "", type: "bool" }],
+        stateMutability: "nonpayable",
+        type: "function",
+    },
+    // Events
+    {
+        anonymous: false,
+        inputs: [
+            { indexed: true, internalType: "address", name: "owner", type: "address" },
+            { indexed: true, internalType: "address", name: "spender", type: "address" },
+            { indexed: false, internalType: "uint256", name: "value", type: "uint256" },
+        ],
+        name: "Approval",
+        type: "event",
+    },
+    {
+        anonymous: false,
+        inputs: [
+            { indexed: true, internalType: "address", name: "from", type: "address" },
+            { indexed: true, internalType: "address", name: "to", type: "address" },
+            { indexed: false, internalType: "uint256", name: "value", type: "uint256" },
+        ],
+        name: "Transfer",
+        type: "event",
+    },
 ] as const
